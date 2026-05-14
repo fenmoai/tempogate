@@ -9,6 +9,7 @@ import (
 	"go.uber.org/fx/fxevent"
 	"go.uber.org/zap"
 
+	"github.com/fenmoai/tempogate/api"
 	"github.com/fenmoai/tempogate/cmd"
 	"github.com/fenmoai/tempogate/config"
 	"github.com/fenmoai/tempogate/log"
@@ -37,6 +38,7 @@ func New(opts ...Option) fx.Option {
 		fx.WithLogger(func(l *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: l.WithOptions(zap.IncreaseLevel(zap.WarnLevel))}
 		}),
+		api.Fx(),
 		cmd.Fx(),
 	}
 	return fx.Options(append(base, cfg.extra...)...)
