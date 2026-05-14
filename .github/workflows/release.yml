@@ -1,0 +1,88 @@
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build (branch, tag, or full SHA). Defaults to the workflow's run ref."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # reserved for future cosign keyless signing
+
+concurrency:
+  group: release-${{ github.event.inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/fenmoai/tempogate
+
+jobs:
+  publish:
+    name: build + push (linux/amd64, linux/arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # `latest` is reserved for stable tag releases (handled below).
+          flavor: |
+            latest=false
+          # Tag mapping:
+          #   tag vX.Y.Z (stable)   -> :vX.Y.Z, :X.Y, :X, :latest
+          #   tag vX.Y.Z-rc.N etc.  -> :vX.Y.Z-rc.N (no truncated/latest aliases)
+          #   workflow_dispatch     -> :sha-<short>
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-') }}
+            type=semver,pattern={{major}},enable=${{ !contains(github.ref, '-') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name == 'workflow_dispatch' }}
+          labels: |
+            org.opencontainers.image.title=tempogate
+            org.opencontainers.image.description=OIDC + OAuth2 authorization server for self-hosted Temporal
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+
+      - name: Build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          build-args: |
+            GIT_TAG=${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-dev' }}
+            GIT_COMMIT=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max

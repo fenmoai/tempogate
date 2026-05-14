@@ -35,15 +35,31 @@ A single binary, distroless-shipped, with subcommands `serve`, `login`, `keys`, 
 
 > **Status:** v0 — only `/healthz` and `/readyz` are wired. OIDC endpoints land in subsequent epics.
 
+Once a release is cut, pull a tagged multi-arch image:
+
+```bash
+docker run --rm -p 8000:8000 ghcr.io/fenmoai/tempogate:latest
+curl http://127.0.0.1:8000/healthz
+```
+
+Image tags:
+
+| Tag | Meaning |
+| --- | --- |
+| `:vX.Y.Z`, `:X.Y`, `:X`, `:latest` | Stable releases (pushed on `git tag vX.Y.Z`) |
+| `:vX.Y.Z-rc.N` | Pre-releases |
+| `:sha-<short>` | One-off builds dispatched manually from a specific commit |
+
+Until the first tag is cut, build from source:
+
 ```bash
 git clone git@github.com:fenmoai/tempogate.git
 cd tempogate
 make build
 ./.bin/tempogate serve            # listens on 127.0.0.1:8000
-curl http://127.0.0.1:8000/healthz
 ```
 
-Or via Docker:
+Or build the container locally:
 
 ```bash
 docker build -t tempogate:dev .
