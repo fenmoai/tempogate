@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/danielgtaylor/huma/v2 v2.37.3
+	github.com/gojekfarm/xrun v0.4.0
 	github.com/gojekfarm/xtools/xload v0.10.0
 	github.com/gojekfarm/xtools/xload/providers/viper v0.10.0
 	github.com/spf13/cobra v1.10.2

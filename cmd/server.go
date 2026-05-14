@@ -6,47 +6,54 @@ import (
 	"net"
 	"net/http"
 
-	"go.uber.org/zap"
+	"github.com/gojekfarm/xrun"
 )
 
-type server struct {
-	*http.Server
-	logger        *zap.Logger
-	shutdownOnErr func(error)
-	onListening   func()
+type httpServerOptions struct {
+	Server *http.Server
+
+	// OnListening fires after net.Listen succeeds and before Serve starts
+	// accepting. Use this to flip /readyz, expose the bound port, etc.
+	OnListening func()
+
+	// OnStopping fires when ctx is cancelled, before srv.Shutdown is called.
+	OnStopping func()
 }
 
-func (s *server) start(_ context.Context) error {
-	lis, err := net.Listen("tcp", s.Addr)
-	if err != nil {
-		return err
-	}
-	if s.onListening != nil {
-		s.onListening()
-	}
-	go s.serve(lis)
-	return nil
-}
+// httpServer returns an xrun.ComponentFunc that binds the listener up-front
+// (so OnListening fires only once the OS confirms we're holding the port,
+// preserving accurate /readyz semantics), serves until ctx cancels, then
+// gracefully Shuts down.
+//
+// Compared to xrun/component.HTTPServer this trades the convenience of
+// ListenAndServe for the ability to observe a successful bind separately
+// from the goroutine that runs Serve.
+func httpServer(opts httpServerOptions) xrun.ComponentFunc {
+	return func(ctx context.Context) error {
+		lis, err := net.Listen("tcp", opts.Server.Addr)
+		if err != nil {
+			return err
+		}
+		if opts.OnListening != nil {
+			opts.OnListening()
+		}
 
-func (s *server) run(ctx context.Context) error {
-	if err := s.start(ctx); err != nil {
-		return err
+		errCh := make(chan error, 1)
+		go func() {
+			if err := opts.Server.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+
+		select {
+		case <-ctx.Done():
+		case err := <-errCh:
+			return err
+		}
+
+		if opts.OnStopping != nil {
+			opts.OnStopping()
+		}
+		return opts.Server.Shutdown(context.Background())
 	}
-	<-ctx.Done()
-	return s.stop(context.Background())
-}
-
-func (s *server) serve(lis net.Listener) {
-	s.logger.Info("starting http server", zap.String("addr", s.Addr))
-
-	if err := s.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		s.logger.Error("error at runtime in http server",
-			zap.String("addr", s.Addr), zap.Error(err))
-		s.shutdownOnErr(err)
-	}
-}
-
-func (s *server) stop(ctx context.Context) error {
-	s.logger.Info("stopping http server", zap.String("addr", s.Addr))
-	return s.Shutdown(ctx)
 }

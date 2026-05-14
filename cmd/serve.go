@@ -3,7 +3,9 @@ package cmd
 import (
 	"net/http"
 
+	"github.com/gojekfarm/xrun"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 func newServeCmd(p RunParams) *cobra.Command {
@@ -18,16 +20,22 @@ func newServeCmd(p RunParams) *cobra.Command {
 				mux.Handle(p.API.Prefix+"/", http.StripPrefix(p.API.Prefix, p.API.Handler))
 			}
 
-			s := &server{
-				Server: &http.Server{
-					Addr:    p.Listener.String(),
-					Handler: mux,
-				},
-				logger:        p.Logger.Named("server"),
-				shutdownOnErr: wrapShutdowner(p.Shutdowner, p.Logger),
-				onListening:   p.Readiness.Mark,
-			}
-			return s.run(cmd.Context())
+			addr := p.Listener.String()
+			logger := p.Logger.Named("server")
+
+			return xrun.All(
+				xrun.NoTimeout,
+				httpServer(httpServerOptions{
+					Server: &http.Server{Addr: addr, Handler: mux},
+					OnListening: func() {
+						logger.Info("starting http server", zap.String("addr", addr))
+						p.Readiness.Mark()
+					},
+					OnStopping: func() {
+						logger.Info("stopping http server", zap.String("addr", addr))
+					},
+				}),
+			).Run(cmd.Context())
 		},
 	}
 }
