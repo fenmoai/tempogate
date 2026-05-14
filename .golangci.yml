@@ -1,0 +1,85 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gocritic
+    - gosec
+    - revive
+
+  settings:
+    revive:
+      severity: warning
+      # Skipping `exported` and `package-comments`: well-named symbols and
+      # short package-level prose carry the meaning. We add doc comments
+      # selectively where they earn their keep, not as a tax on every Fx()
+      # / Option / Result.
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        - hugeParam      # noisy with fx Params structs
+        - rangeValCopy
+        - paramTypeCombine
+        - unnamedResult  # multi-return helpers in tests are clear enough
+
+    gosec:
+      excludes:
+        - G404 # math/rand is fine in tests; crypto/rand for prod is enforced by review
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+      # Cobra/fx hook signatures and lifecycle callbacks intentionally accept
+      # params they don't use.
+      - path: cmd/(fx|serve|server)\.go
+        text: "unused-parameter"
+
+formatters:
+  enable:
+    - gofmt
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/fenmoai/tempogate)

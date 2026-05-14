@@ -32,8 +32,8 @@ func get(t *testing.T, url string) (int, []byte) {
 
 func TestHealthz_OK(t *testing.T) {
 	t.Parallel()
-	srv, close := newTestServer(t, api.NewReadiness())
-	defer close()
+	srv, cleanup := newTestServer(t, api.NewReadiness())
+	defer cleanup()
 
 	code, body := get(t, srv.URL+"/healthz")
 	assert.Equal(t, http.StatusOK, code)
@@ -50,8 +50,8 @@ func TestHealthz_OK(t *testing.T) {
 func TestReadyz_503BeforeMark_200After(t *testing.T) {
 	t.Parallel()
 	r := api.NewReadiness()
-	srv, close := newTestServer(t, r)
-	defer close()
+	srv, cleanup := newTestServer(t, r)
+	defer cleanup()
 
 	code, _ := get(t, srv.URL+"/readyz")
 	assert.Equal(t, http.StatusServiceUnavailable, code, "should be 503 before Mark()")

@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gojekfarm/xrun"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
+
+const readHeaderTimeout = 10 * time.Second
 
 func newServeCmd(p RunParams) *cobra.Command {
 	return &cobra.Command{
@@ -26,7 +29,11 @@ func newServeCmd(p RunParams) *cobra.Command {
 			return xrun.All(
 				xrun.NoTimeout,
 				httpServer(httpServerOptions{
-					server: &http.Server{Addr: addr, Handler: mux},
+					server: &http.Server{
+						Addr:              addr,
+						Handler:           mux,
+						ReadHeaderTimeout: readHeaderTimeout,
+					},
 					onListening: func() {
 						logger.Info("starting http server", zap.String("addr", addr))
 						p.Readiness.Mark()
