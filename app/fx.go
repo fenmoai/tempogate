@@ -1,14 +1,17 @@
 // Package app is the fx composition root for the tempogate binary.
 //
-// Subsequent epics (E1.2 config/log, E1.3 HTTP server, E2 keys, …) plug
-// their fx.Options into New via the functional-options pattern below; today
-// only the cobra dispatcher (cmd) is wired.
+// Subsequent epics (E1.3 HTTP server, E2 keys, …) plug their fx.Options into
+// New via the functional-options pattern below.
 package app
 
 import (
 	"go.uber.org/fx"
+	"go.uber.org/fx/fxevent"
+	"go.uber.org/zap"
 
 	"github.com/fenmoai/tempogate/cmd"
+	"github.com/fenmoai/tempogate/config"
+	"github.com/fenmoai/tempogate/log"
 )
 
 type appConfig struct {
@@ -28,5 +31,13 @@ func New(opts ...Option) fx.Option {
 	for _, o := range opts {
 		o(cfg)
 	}
-	return fx.Options(append([]fx.Option{cmd.Fx()}, cfg.extra...)...)
+	base := []fx.Option{
+		config.Fx(),
+		log.Fx(),
+		fx.WithLogger(func(l *zap.Logger) fxevent.Logger {
+			return &fxevent.ZapLogger{Logger: l.WithOptions(zap.IncreaseLevel(zap.WarnLevel))}
+		}),
+		cmd.Fx(),
+	}
+	return fx.Options(append(base, cfg.extra...)...)
 }

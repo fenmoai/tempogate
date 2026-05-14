@@ -3,18 +3,22 @@ package app_test
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/fx"
 	"go.uber.org/fx/fxtest"
 
 	"github.com/fenmoai/tempogate/app"
 )
 
-// TestComposition proves the fx graph resolves and the lifecycle hooks
-// registered by app.New() start and stop cleanly. With only the version
-// subcommand wired, the cobra dispatcher prints root help on no-args and
-// signals shutdown; fxtest tolerates that within RequireStart/RequireStop.
-func TestComposition(t *testing.T) {
-	t.Parallel()
-
-	a := fxtest.New(t, app.New())
+// TestNew proves the fx graph resolves end-to-end (config + log + cmd) and
+// that lifecycle hooks fire. Set LOG__LEVEL or HTTP__LISTENER in the env to
+// exercise the env-override path.
+func TestNew(t *testing.T) {
+	ran := false
+	a := fxtest.New(t,
+		app.New(),
+		fx.Invoke(func() { ran = true }),
+	)
 	a.RequireStart().RequireStop()
+	assert.True(t, ran)
 }
