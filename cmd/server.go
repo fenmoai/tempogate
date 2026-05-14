@@ -10,18 +10,18 @@ import (
 )
 
 type httpServerOptions struct {
-	Server *http.Server
+	server *http.Server
 
-	// OnListening fires after net.Listen succeeds and before Serve starts
+	// onListening fires after net.Listen succeeds and before Serve starts
 	// accepting. Use this to flip /readyz, expose the bound port, etc.
-	OnListening func()
+	onListening func()
 
-	// OnStopping fires when ctx is cancelled, before srv.Shutdown is called.
-	OnStopping func()
+	// onStopping fires when ctx is cancelled, before srv.Shutdown is called.
+	onStopping func()
 }
 
 // httpServer returns an xrun.ComponentFunc that binds the listener up-front
-// (so OnListening fires only once the OS confirms we're holding the port,
+// (so onListening fires only once the OS confirms we're holding the port,
 // preserving accurate /readyz semantics), serves until ctx cancels, then
 // gracefully Shuts down.
 //
@@ -30,17 +30,17 @@ type httpServerOptions struct {
 // from the goroutine that runs Serve.
 func httpServer(opts httpServerOptions) xrun.ComponentFunc {
 	return func(ctx context.Context) error {
-		lis, err := net.Listen("tcp", opts.Server.Addr)
+		lis, err := net.Listen("tcp", opts.server.Addr)
 		if err != nil {
 			return err
 		}
-		if opts.OnListening != nil {
-			opts.OnListening()
+		if opts.onListening != nil {
+			opts.onListening()
 		}
 
 		errCh := make(chan error, 1)
 		go func() {
-			if err := opts.Server.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := opts.server.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- err
 			}
 		}()
@@ -51,9 +51,9 @@ func httpServer(opts httpServerOptions) xrun.ComponentFunc {
 			return err
 		}
 
-		if opts.OnStopping != nil {
-			opts.OnStopping()
+		if opts.onStopping != nil {
+			opts.onStopping()
 		}
-		return opts.Server.Shutdown(context.Background())
+		return opts.server.Shutdown(context.Background())
 	}
 }

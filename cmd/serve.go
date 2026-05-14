@@ -26,12 +26,12 @@ func newServeCmd(p RunParams) *cobra.Command {
 			return xrun.All(
 				xrun.NoTimeout,
 				httpServer(httpServerOptions{
-					Server: &http.Server{Addr: addr, Handler: mux},
-					OnListening: func() {
+					server: &http.Server{Addr: addr, Handler: mux},
+					onListening: func() {
 						logger.Info("starting http server", zap.String("addr", addr))
 						p.Readiness.Mark()
 					},
-					OnStopping: func() {
+					onStopping: func() {
 						logger.Info("stopping http server", zap.String("addr", addr))
 					},
 				}),
