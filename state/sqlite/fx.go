@@ -28,8 +28,7 @@ func newFx(p Params) (*Store, error) {
 	}
 
 	p.Lifecycle.Append(fx.Hook{
-		OnStart: func(ctx context.Context) error { return s.Ping(ctx) },
-		OnStop:  func(_ context.Context) error { return s.Close() },
+		OnStop: func(_ context.Context) error { return s.Close() },
 	})
 	return s, nil
 }

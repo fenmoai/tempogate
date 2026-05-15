@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -16,6 +17,15 @@ func newServeCmd(p RunParams) *cobra.Command {
 		Use:   "serve",
 		Short: "Run the tempogate HTTP server",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+
+			if err := p.Store.Ping(ctx); err != nil {
+				return fmt.Errorf("state store unreachable: %w", err)
+			}
+			if err := p.Store.IsCurrent(ctx); err != nil {
+				return err
+			}
+
 			mux := http.NewServeMux()
 			if p.API.Prefix == "" {
 				mux.Handle("/", p.API.Handler)
@@ -42,7 +52,7 @@ func newServeCmd(p RunParams) *cobra.Command {
 						logger.Info("stopping http server", zap.String("addr", addr))
 					},
 				}),
-			).Run(cmd.Context())
+			).Run(ctx)
 		},
 	}
 }

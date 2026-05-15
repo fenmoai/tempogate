@@ -27,6 +27,45 @@ type migration struct {
 	sql     string
 }
 
+// IsCurrent returns nil when the database has applied every embedded
+// migration. When the applied max-version trails the embedded one it
+// returns an error in the form
+//
+//	schema version X, expected Y; run `tempogate migrate`
+//
+// which is what serve surfaces to the operator.
+func (s *Store) IsCurrent(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, schemaVersionDDL); err != nil {
+		return fmt.Errorf("sqlite: ensure schema_migrations: %w", err)
+	}
+
+	var dbMax sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(version) FROM schema_migrations`,
+	).Scan(&dbMax); err != nil {
+		return fmt.Errorf("sqlite: read max version: %w", err)
+	}
+
+	applied := 0
+	if dbMax.Valid {
+		applied = int(dbMax.Int64)
+	}
+
+	migs, err := loadMigrations()
+	if err != nil {
+		return err
+	}
+	expected := 0
+	if len(migs) > 0 {
+		expected = migs[len(migs)-1].version
+	}
+
+	if applied < expected {
+		return fmt.Errorf("schema version %d, expected %d; run `tempogate migrate`", applied, expected)
+	}
+	return nil
+}
+
 // Migrate applies every embedded migration whose version has not yet been
 // recorded in schema_migrations. Safe to run repeatedly; second invocations
 // are a no-op.

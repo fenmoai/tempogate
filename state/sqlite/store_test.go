@@ -51,6 +51,29 @@ func (s *StoreSuite) TestNewRejectsEmptyPath() {
 	s.Require().Error(err)
 }
 
+func (s *StoreSuite) TestIsCurrent() {
+	// SetupTest already ran Migrate; current state should be clean.
+	s.Require().NoError(s.store.IsCurrent(s.ctx))
+
+	_, err := s.store.db.ExecContext(s.ctx, `DELETE FROM schema_migrations`)
+	s.Require().NoError(err)
+
+	err = s.store.IsCurrent(s.ctx)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "schema version 0, expected 1")
+	s.Contains(err.Error(), "tempogate migrate")
+}
+
+func (s *StoreSuite) TestIsCurrentOnFreshDB() {
+	fresh, err := New(WithPath(filepath.Join(s.T().TempDir(), "fresh.db")))
+	s.Require().NoError(err)
+	defer func() { _ = fresh.Close() }()
+
+	err = fresh.IsCurrent(s.ctx)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "schema version 0, expected 1")
+}
+
 func (s *StoreSuite) TestMigrateIsIdempotent() {
 	s.Require().NoError(s.store.Migrate(s.ctx))
 	s.Require().NoError(s.store.Migrate(s.ctx))

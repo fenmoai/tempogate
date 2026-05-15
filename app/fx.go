@@ -13,6 +13,7 @@ import (
 	"github.com/fenmoai/tempogate/cmd"
 	"github.com/fenmoai/tempogate/config"
 	"github.com/fenmoai/tempogate/log"
+	"github.com/fenmoai/tempogate/state/sqlite"
 )
 
 type appConfig struct {
@@ -38,6 +39,7 @@ func New(opts ...Option) fx.Option {
 		fx.WithLogger(func(l *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: l.WithOptions(zap.IncreaseLevel(zap.WarnLevel))}
 		}),
+		sqlite.Fx(),
 		api.Fx(),
 		cmd.Fx(),
 	}
