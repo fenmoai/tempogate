@@ -2,6 +2,7 @@ package config
 
 import (
 	"net"
+	"time"
 
 	xloadtype "github.com/gojekfarm/xtools/xload/type"
 )
@@ -13,6 +14,13 @@ func defaultConfig() *Config {
 			Listener: xloadtype.Listener{
 				IP:   net.IPv4(127, 0, 0, 1),
 				Port: 8000,
+			},
+		},
+		State: StateConfig{
+			Sqlite: SqliteConfig{
+				Path:        "/var/lib/tempogate/state.db",
+				MaxConns:    1,
+				BusyTimeout: 5 * time.Second,
 			},
 		},
 	}

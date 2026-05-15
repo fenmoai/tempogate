@@ -1,6 +1,8 @@
 package config
 
 import (
+	"time"
+
 	xloadtype "github.com/gojekfarm/xtools/xload/type"
 	"go.uber.org/fx"
 
@@ -13,8 +15,11 @@ import (
 type Result struct {
 	fx.Out
 
-	LogLevel     log.Level
-	HTTPListener xloadtype.Listener `name:"http"`
+	LogLevel          log.Level
+	HTTPListener      xloadtype.Listener `name:"http"`
+	SqlitePath        string             `name:"sqlite_path"`
+	SqliteMaxConns    int                `name:"sqlite_max_conns"`
+	SqliteBusyTimeout time.Duration      `name:"sqlite_busy_timeout"`
 }
 
 func Fx() fx.Option {
@@ -22,8 +27,11 @@ func Fx() fx.Option {
 		fx.Provide(New),
 		fx.Provide(func(cfg *Config) Result {
 			return Result{
-				LogLevel:     log.Level(cfg.Log.Level),
-				HTTPListener: cfg.HTTP.Listener,
+				LogLevel:          log.Level(cfg.Log.Level),
+				HTTPListener:      cfg.HTTP.Listener,
+				SqlitePath:        cfg.State.Sqlite.Path,
+				SqliteMaxConns:    cfg.State.Sqlite.MaxConns,
+				SqliteBusyTimeout: cfg.State.Sqlite.BusyTimeout,
 			}
 		}),
 	)

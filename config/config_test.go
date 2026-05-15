@@ -3,30 +3,103 @@ package config
 import (
 	"net"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	xloadtype "github.com/gojekfarm/xtools/xload/type"
+	"github.com/stretchr/testify/suite"
 )
 
-func TestNew_Defaults(t *testing.T) {
-	cfg, err := New(Params{})
-	require.NoError(t, err)
-
-	assert.Equal(t, "info", cfg.Log.Level)
-	assert.True(t, cfg.HTTP.Listener.IP.Equal(net.IPv4(127, 0, 0, 1)),
-		"want 127.0.0.1, got %v", cfg.HTTP.Listener.IP)
-	assert.Equal(t, 8000, cfg.HTTP.Listener.Port)
+type ConfigSuite struct {
+	suite.Suite
 }
 
-func TestNew_EnvOverride(t *testing.T) {
-	t.Setenv("LOG__LEVEL", "debug")
-	t.Setenv("HTTP__LISTENER", "0.0.0.0:9000")
+func TestConfigSuite(t *testing.T) {
+	suite.Run(t, new(ConfigSuite))
+}
 
-	cfg, err := New(Params{})
-	require.NoError(t, err)
+func (s *ConfigSuite) TestNew() {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want *Config
+	}{
+		{
+			name: "defaults",
+			want: &Config{
+				Log: LogConfig{Level: "info"},
+				HTTP: HTTPConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8000,
+					},
+				},
+				State: StateConfig{
+					Sqlite: SqliteConfig{
+						Path:        "/var/lib/tempogate/state.db",
+						MaxConns:    1,
+						BusyTimeout: 5 * time.Second,
+					},
+				},
+			},
+		},
+		{
+			name: "log and http overridden by env",
+			env: map[string]string{
+				"LOG__LEVEL":     "debug",
+				"HTTP__LISTENER": "0.0.0.0:9000",
+			},
+			want: &Config{
+				Log: LogConfig{Level: "debug"},
+				HTTP: HTTPConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(0, 0, 0, 0),
+						Port: 9000,
+					},
+				},
+				State: StateConfig{
+					Sqlite: SqliteConfig{
+						Path:        "/var/lib/tempogate/state.db",
+						MaxConns:    1,
+						BusyTimeout: 5 * time.Second,
+					},
+				},
+			},
+		},
+		{
+			name: "sqlite overridden by env",
+			env: map[string]string{
+				"STATE__SQLITE__PATH":         "/tmp/tempogate.db",
+				"STATE__SQLITE__MAX_CONNS":    "8",
+				"STATE__SQLITE__BUSY_TIMEOUT": "2s",
+			},
+			want: &Config{
+				Log: LogConfig{Level: "info"},
+				HTTP: HTTPConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8000,
+					},
+				},
+				State: StateConfig{
+					Sqlite: SqliteConfig{
+						Path:        "/tmp/tempogate.db",
+						MaxConns:    8,
+						BusyTimeout: 2 * time.Second,
+					},
+				},
+			},
+		},
+	}
 
-	assert.Equal(t, "debug", cfg.Log.Level)
-	assert.True(t, cfg.HTTP.Listener.IP.Equal(net.IPv4(0, 0, 0, 0)),
-		"want 0.0.0.0, got %v", cfg.HTTP.Listener.IP)
-	assert.Equal(t, 9000, cfg.HTTP.Listener.Port)
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			for k, v := range tc.env {
+				s.T().Setenv(k, v)
+			}
+
+			got, err := New(Params{})
+			s.Require().NoError(err)
+			s.Equal(tc.want, got)
+		})
+	}
 }

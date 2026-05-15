@@ -1,0 +1,235 @@
+package sqlite
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/suite"
+	"go.uber.org/fx"
+	"go.uber.org/fx/fxtest"
+
+	"github.com/fenmoai/tempogate/config"
+	"github.com/fenmoai/tempogate/keys"
+	tlog "github.com/fenmoai/tempogate/log"
+)
+
+type StoreSuite struct {
+	suite.Suite
+
+	ctx   context.Context
+	store *Store
+	path  string
+}
+
+func TestStoreSuite(t *testing.T) {
+	suite.Run(t, new(StoreSuite))
+}
+
+func (s *StoreSuite) SetupTest() {
+	s.ctx = context.Background()
+	s.path = filepath.Join(s.T().TempDir(), "test.db")
+
+	store, err := New(WithPath(s.path), WithBusyTimeout(time.Second))
+	s.Require().NoError(err)
+	s.Require().NoError(store.Migrate(s.ctx))
+
+	s.store = store
+}
+
+func (s *StoreSuite) TearDownTest() {
+	if s.store != nil {
+		s.Require().NoError(s.store.Close())
+		s.store = nil
+	}
+}
+
+func (s *StoreSuite) TestNewRejectsEmptyPath() {
+	_, err := New(WithPath(""))
+	s.Require().Error(err)
+}
+
+func (s *StoreSuite) TestMigrateIsIdempotent() {
+	s.Require().NoError(s.store.Migrate(s.ctx))
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	var versions int
+	row := s.store.db.QueryRowContext(s.ctx, `SELECT count(*) FROM schema_migrations`)
+	s.Require().NoError(row.Scan(&versions))
+	s.Equal(1, versions)
+
+	var table string
+	row = s.store.db.QueryRowContext(s.ctx,
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='keypairs'`)
+	s.Require().NoError(row.Scan(&table))
+	s.Equal("keypairs", table)
+}
+
+func (s *StoreSuite) TestKeypairRoundTrip() {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	kp := func(kid string, offset time.Duration) keys.Keypair {
+		return keys.Keypair{
+			Kid:        kid,
+			Alg:        "RS256",
+			PrivatePEM: []byte("priv-" + kid),
+			PublicPEM:  []byte("pub-" + kid),
+			CreatedAt:  now.Add(offset),
+		}
+	}
+
+	cases := []struct {
+		name string
+		save []keys.Keypair
+	}{
+		{"empty store returns nothing", nil},
+		{"single keypair", []keys.Keypair{kp("kid-1", 0)}},
+		{"multiple keypairs ordered by created_at", []keys.Keypair{
+			kp("kid-a", 0),
+			kp("kid-b", time.Second),
+			kp("kid-c", 2*time.Second),
+		}},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			s.SetupTest()
+			defer s.TearDownTest()
+
+			for _, kp := range tc.save {
+				s.Require().NoError(s.store.SaveKeypair(s.ctx, kp))
+			}
+
+			got, err := s.store.LoadKeypairs(s.ctx)
+			s.Require().NoError(err)
+			s.Require().Len(got, len(tc.save))
+
+			for i, want := range tc.save {
+				s.Equal(want.Kid, got[i].Kid)
+				s.Equal(want.Alg, got[i].Alg)
+				s.Equal(want.PrivatePEM, got[i].PrivatePEM)
+				s.Equal(want.PublicPEM, got[i].PublicPEM)
+				s.True(want.CreatedAt.Equal(got[i].CreatedAt),
+					"createdAt mismatch: want %v, got %v", want.CreatedAt, got[i].CreatedAt)
+			}
+		})
+	}
+}
+
+func (s *StoreSuite) TestSaveKeypairDuplicateKid() {
+	kp := keys.Keypair{
+		Kid:        "kid-dup",
+		Alg:        "RS256",
+		PrivatePEM: []byte("priv"),
+		PublicPEM:  []byte("pub"),
+		CreatedAt:  time.Now().UTC().Truncate(time.Microsecond),
+	}
+
+	s.Require().NoError(s.store.SaveKeypair(s.ctx, kp))
+
+	err := s.store.SaveKeypair(s.ctx, kp)
+	s.Require().Error(err)
+	s.Truef(errors.Is(err, ErrDuplicateKid),
+		"expected ErrDuplicateKid, got %v", err)
+}
+
+func (s *StoreSuite) TestPingAfterClose() {
+	store, err := New(WithPath(filepath.Join(s.T().TempDir(), "ping.db")))
+	s.Require().NoError(err)
+	s.Require().NoError(store.Ping(s.ctx))
+	s.Require().NoError(store.Close())
+	s.Require().Error(store.Ping(s.ctx))
+}
+
+func (s *StoreSuite) TestErrorsAfterClose() {
+	s.Require().NoError(s.store.Close())
+
+	cases := []struct {
+		name string
+		op   func() error
+	}{
+		{"SaveKeypair", func() error {
+			return s.store.SaveKeypair(s.ctx, keys.Keypair{
+				Kid: "x", Alg: "RS256", CreatedAt: time.Now().UTC(),
+			})
+		}},
+		{"LoadKeypairs", func() error {
+			_, err := s.store.LoadKeypairs(s.ctx)
+			return err
+		}},
+		{"Migrate", func() error { return s.store.Migrate(s.ctx) }},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			err := tc.op()
+			s.Require().Error(err)
+			s.Falsef(errors.Is(err, ErrDuplicateKid),
+				"closed-db error should not look like ErrDuplicateKid: %v", err)
+		})
+	}
+
+	s.store = nil
+}
+
+func (s *StoreSuite) TestParseMigration() {
+	cases := []struct {
+		name    string
+		fname   string
+		wantErr bool
+		wantVer int
+	}{
+		{"valid", "0001_keypairs.sql", false, 1},
+		{"three digits", "042_foo.sql", false, 42},
+		{"no underscore", "0001.sql", true, 0},
+		{"underscore at start", "_keypairs.sql", true, 0},
+		{"non-numeric prefix", "abcd_foo.sql", true, 0},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			m, err := parseMigration(tc.fname)
+			if tc.wantErr {
+				s.Require().Error(err)
+				return
+			}
+			s.Require().NoError(err)
+			s.Equal(tc.wantVer, m.version)
+		})
+	}
+}
+
+func (s *StoreSuite) TestFxRejectsEmptyPath() {
+	app := fx.New(
+		fx.NopLogger,
+		fx.Supply(
+			fx.Annotated{Name: "sqlite_path", Target: ""},
+			fx.Annotated{Name: "sqlite_max_conns", Target: 1},
+			fx.Annotated{Name: "sqlite_busy_timeout", Target: time.Second},
+		),
+		Fx(),
+		fx.Invoke(func(*Store) {}),
+	)
+	s.Require().Error(app.Err())
+}
+
+func (s *StoreSuite) TestFxComposition() {
+	path := filepath.Join(s.T().TempDir(), "fx.db")
+	s.T().Setenv("STATE__SQLITE__PATH", path)
+	s.T().Setenv("STATE__SQLITE__BUSY_TIMEOUT", "1s")
+	s.T().Setenv("STATE__SQLITE__MAX_CONNS", "1")
+
+	var injected *Store
+	a := fxtest.New(s.T(),
+		config.Fx(),
+		tlog.Fx(),
+		Fx(),
+		fx.Populate(&injected),
+	)
+	a.RequireStart()
+	defer a.RequireStop()
+
+	s.Require().NotNil(injected)
+	s.Require().NoError(injected.Migrate(s.ctx))
+}
