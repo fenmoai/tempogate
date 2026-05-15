@@ -12,6 +12,7 @@ import (
 	"github.com/fenmoai/tempogate/api"
 	"github.com/fenmoai/tempogate/cmd"
 	"github.com/fenmoai/tempogate/config"
+	"github.com/fenmoai/tempogate/keys"
 	"github.com/fenmoai/tempogate/log"
 	"github.com/fenmoai/tempogate/state/sqlite"
 )
@@ -40,6 +41,7 @@ func New(opts ...Option) fx.Option {
 			return &fxevent.ZapLogger{Logger: l.WithOptions(zap.IncreaseLevel(zap.WarnLevel))}
 		}),
 		sqlite.Fx(),
+		keys.Fx(),
 		api.Fx(),
 		cmd.Fx(),
 	}

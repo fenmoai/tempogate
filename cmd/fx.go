@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/fenmoai/tempogate/api"
+	"github.com/fenmoai/tempogate/keys"
 	"github.com/fenmoai/tempogate/state/sqlite"
 )
 
@@ -28,6 +29,8 @@ type RunParams struct {
 
 	Store      *sqlite.Store
 	SqlitePath string `name:"sqlite_path"`
+
+	Keys *keys.Keys
 }
 
 // Run is the cobra dispatcher fx invokes after the graph builds.
@@ -41,6 +44,7 @@ func Run(p RunParams) {
 	rootCmd := NewRootCmd(
 		WithSubcommand(newServeCmd(p)),
 		WithSubcommand(newMigrateCmd(p)),
+		WithSubcommand(newKeysCmd(p)),
 	)
 	done := make(chan struct{})
 

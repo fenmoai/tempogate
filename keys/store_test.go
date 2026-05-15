@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// fakeKeyStore is an in-memory keyStore that demonstrates the consumer-side
+// fakeKeyStore is an in-memory KeyStore that demonstrates the consumer-side
 // test pattern: the interface is satisfied structurally inside the test file
 // of the package that defines it.
 type fakeKeyStore struct {
@@ -32,13 +32,13 @@ func (s *fakeKeyStore) LoadKeypairs(_ context.Context) ([]Keypair, error) {
 	return out, nil
 }
 
-var _ keyStore = (*fakeKeyStore)(nil)
+var _ KeyStore = (*fakeKeyStore)(nil)
 
 type KeyStoreSuite struct {
 	suite.Suite
 
 	ctx   context.Context
-	store keyStore
+	store KeyStore
 }
 
 func TestKeyStoreSuite(t *testing.T) {

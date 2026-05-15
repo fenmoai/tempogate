@@ -2,12 +2,14 @@ package keys
 
 import "context"
 
-// keyStore is the consumer-side state interface for this package.
+// KeyStore is the consumer-side state interface for this package.
 //
 // Per the convention documented in package state, interfaces live with the
-// package that uses them; the concrete store will satisfy this structurally
-// without importing keys/.
-type keyStore interface {
+// package that uses them; the concrete store satisfies this structurally
+// without importing keys/. The type is exported so the composition root can
+// inject it (via fx.As) — the convention is about where the interface is
+// defined, not its visibility.
+type KeyStore interface {
 	SaveKeypair(ctx context.Context, kp Keypair) error
 	LoadKeypairs(ctx context.Context) ([]Keypair, error)
 }
