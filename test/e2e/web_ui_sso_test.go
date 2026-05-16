@@ -69,6 +69,20 @@ func imageOr(env, def string) string {
 	return def
 }
 
+// builtImageSource decides whether a container is run from a pre-built image
+// or built in-test. Both Dockerfiles use BuildKit-only syntax (`# syntax=`,
+// `RUN --mount`), but testcontainers builds via Docker's classic builder,
+// which cannot parse those. So `make test-e2e` (and CI) pre-builds them with a
+// BuildKit-capable `docker build` and passes the tag via env; the
+// FromDockerfile path remains only as a fallback for environments whose
+// builder can handle BuildKit syntax.
+func builtImageSource(envVar, dockerfile, root string) (string, testcontainers.FromDockerfile) {
+	if v := os.Getenv(envVar); v != "" {
+		return v, testcontainers.FromDockerfile{}
+	}
+	return "", testcontainers.FromDockerfile{Context: root, Dockerfile: dockerfile, KeepImage: true}
+}
+
 // stack holds the host-reachable endpoints the test process needs; everything
 // else addresses peers by Docker network alias.
 type stack struct {
@@ -146,11 +160,11 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 	alias := func(name string) map[string][]string { return map[string][]string{netName: {name}} }
 
 	// --- mock Google ---
+	mockImg, mockFrom := builtImageSource("E2E_MOCKGOOGLE_IMAGE", "test/e2e/mockgoogle/Dockerfile", root)
 	mock, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			FromDockerfile: testcontainers.FromDockerfile{
-				Context: root, Dockerfile: "test/e2e/mockgoogle/Dockerfile", KeepImage: true,
-			},
+			Image:          mockImg,
+			FromDockerfile: mockFrom,
 			Env:            map[string]string{"MOCK_ISSUER": mockIssuer},
 			ExposedPorts:   []string{"8080/tcp"},
 			Networks:       []string{netName},
@@ -178,11 +192,12 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 		"OIDC__GOOGLE__ISSUER_URL":     mockIssuer,
 	}
 	stateVol := fmt.Sprintf("tempogate-e2e-state-%d", time.Now().UnixNano())
-	tgImage := testcontainers.FromDockerfile{Context: root, Dockerfile: "Dockerfile", KeepImage: true}
+	tgImg, tgFrom := builtImageSource("E2E_TEMPOGATE_IMAGE", "Dockerfile", root)
 
 	migrate, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			FromDockerfile: tgImage,
+			Image:          tgImg,
+			FromDockerfile: tgFrom,
 			Cmd:            []string{"migrate"},
 			Env:            tgEnv,
 			User:           "0:0", // shared named volume; run as root so serve can reopen the file
@@ -196,7 +211,8 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 
 	tempogate, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			FromDockerfile: tgImage,
+			Image:          tgImg,
+			FromDockerfile: tgFrom,
 			Cmd:            []string{"serve"},
 			Env:            tgEnv,
 			User:           "0:0",
