@@ -27,6 +27,7 @@ func (s *FxSuite) supplyConfig(clients string) fx.Option {
 		fx.Provide(func() oidc.TokenStore { return newMemTokenStore() }),
 		fx.Provide(func() oidc.Upstream { return &fakeUpstream{} }),
 		fx.Provide(func() *keys.Signer { return keys.NewSigner() }),
+		fx.Provide(func() *keys.Verifier { return keys.NewVerifier() }),
 		fx.Supply(
 			fx.Annotated{Name: "oidc_issuer", Target: testIssuer},
 			fx.Annotated{Name: "oidc_clients", Target: clients},
@@ -52,7 +53,7 @@ func (s *FxSuite) TestProvidesRegistrarIntoGroup() {
 	app.RequireStart()
 	defer app.RequireStop()
 
-	s.Require().Len(got.Registrars, 3)
+	s.Require().Len(got.Registrars, 4)
 }
 
 func (s *FxSuite) TestMalformedClientsFailsGraph() {

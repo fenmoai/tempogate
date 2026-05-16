@@ -18,7 +18,11 @@ import (
 )
 
 const (
-	tokenPath = "/token"
+	// TokenPath and UserInfoPath are exported so the OIDC discovery document
+	// can advertise the same token_endpoint / userinfo_endpoint these
+	// handlers register, keeping the two from drifting.
+	TokenPath    = "/token"
+	UserInfoPath = "/userinfo"
 
 	grantAuthorizationCode = "authorization_code"
 	grantRefreshToken      = "refresh_token"
@@ -147,7 +151,7 @@ func (t *Token) Register(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "token",
 		Method:      http.MethodPost,
-		Path:        tokenPath,
+		Path:        TokenPath,
 		Summary:     "OAuth2 token endpoint (authorization_code + refresh_token grants)",
 		Tags:        []string{"oidc"},
 	}, func(ctx context.Context, in *tokenInput) (*tokenOutput, error) {

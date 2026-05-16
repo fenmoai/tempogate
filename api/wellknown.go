@@ -8,6 +8,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/fenmoai/tempogate/keys"
+	"github.com/fenmoai/tempogate/oidc"
 )
 
 const (
@@ -41,13 +42,21 @@ type jwksOutput struct {
 	Body         jwksDoc
 }
 
-// openIDConfig is a partial OIDC discovery document. Only the fields that are
-// already true regardless of the SSO flow are populated; the authorization,
-// token, and userinfo endpoint URLs are added once those endpoints exist.
+// openIDConfig is the OIDC discovery document. Endpoint URLs are derived
+// from the issuer plus the paths the oidc handlers register at, so the
+// document and the live routes cannot drift. The supported-* lists describe
+// exactly the flow tempogate implements: authorization-code + PKCE (S256
+// only), refresh-token renewal, RS256-signed tokens.
 type openIDConfig struct {
 	Issuer                           string   `json:"issuer"`
+	AuthorizationEndpoint            string   `json:"authorization_endpoint"`
+	TokenEndpoint                    string   `json:"token_endpoint"`
+	UserinfoEndpoint                 string   `json:"userinfo_endpoint"`
 	JwksURI                          string   `json:"jwks_uri"`
 	ResponseTypesSupported           []string `json:"response_types_supported"`
+	GrantTypesSupported              []string `json:"grant_types_supported"`
+	CodeChallengeMethodsSupported    []string `json:"code_challenge_methods_supported"`
+	ScopesSupported                  []string `json:"scopes_supported"`
 	SubjectTypesSupported            []string `json:"subject_types_supported"`
 	IDTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported"`
 }
@@ -108,15 +117,21 @@ func registerWellKnown(a huma.API, k JWKSSource, issuer string) {
 		OperationID: "openid-configuration",
 		Method:      http.MethodGet,
 		Path:        discoveryPath,
-		Summary:     "OIDC discovery document (partial; flow endpoint URLs added when those endpoints land)",
+		Summary:     "OIDC discovery document",
 		Tags:        []string{"well-known"},
 	}, func(_ context.Context, _ *struct{}) (*openIDOutput, error) {
 		return &openIDOutput{
 			CacheControl: wellKnownCacheControl,
 			Body: openIDConfig{
 				Issuer:                           issuer,
+				AuthorizationEndpoint:            issuer + oidc.AuthorizePath,
+				TokenEndpoint:                    issuer + oidc.TokenPath,
+				UserinfoEndpoint:                 issuer + oidc.UserInfoPath,
 				JwksURI:                          issuer + jwksPath,
 				ResponseTypesSupported:           []string{"code"},
+				GrantTypesSupported:              []string{"authorization_code", "refresh_token"},
+				CodeChallengeMethodsSupported:    []string{"S256"},
+				ScopesSupported:                  []string{"openid", "profile", "email"},
 				SubjectTypesSupported:            []string{"public"},
 				IDTokenSigningAlgValuesSupported: []string{keys.AlgRS256},
 			},

@@ -15,7 +15,10 @@ import (
 )
 
 const (
-	authorizePath = "/authorize"
+	// AuthorizePath is exported so the OIDC discovery document can advertise
+	// the same authorization_endpoint this handler registers, keeping the
+	// two from drifting.
+	AuthorizePath = "/authorize"
 
 	// CallbackPath is exported so the oidc/google provider can build a
 	// redirect_uri that exactly matches the one /authorize sends to Google;
@@ -117,7 +120,7 @@ func (a *Authorizer) Register(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID:   "authorize",
 		Method:        http.MethodGet,
-		Path:          authorizePath,
+		Path:          AuthorizePath,
 		Summary:       "OIDC authorization endpoint (authorization-code flow; redirects to Google)",
 		Tags:          []string{"oidc"},
 		DefaultStatus: http.StatusFound,

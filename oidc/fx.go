@@ -62,10 +62,24 @@ func newTokenRegistrar(p tokenParams) func(huma.API) {
 	return t.Register
 }
 
-// Fx contributes the /authorize, /callback/google and /token registrars into
-// the shared "api_registrars" group the api package collects. The store,
-// upstream and signer dependencies are satisfied by state/sqlite, oidc/google
-// and keys via fx.As / fx.Provide.
+type userInfoParams struct {
+	fx.In
+
+	Verifier *keys.Verifier
+}
+
+// newUserInfoRegistrar builds the /userinfo endpoint. The Verifier is
+// provided by keys.Fx over the same keypair aggregate the Signer uses, so a
+// token minted by /token verifies here.
+func newUserInfoRegistrar(p userInfoParams) func(huma.API) {
+	u := NewUserInfo(p.Verifier)
+	return u.Register
+}
+
+// Fx contributes the /authorize, /callback/google, /token and /userinfo
+// registrars into the shared "api_registrars" group the api package collects.
+// The store, upstream, signer and verifier dependencies are satisfied by
+// state/sqlite, oidc/google and keys via fx.As / fx.Provide.
 func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(
@@ -83,6 +97,12 @@ func Fx() fx.Option {
 		fx.Provide(
 			fx.Annotate(
 				newTokenRegistrar,
+				fx.ResultTags(`group:"api_registrars"`),
+			),
+		),
+		fx.Provide(
+			fx.Annotate(
+				newUserInfoRegistrar,
 				fx.ResultTags(`group:"api_registrars"`),
 			),
 		),
