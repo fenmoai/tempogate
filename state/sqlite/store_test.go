@@ -61,7 +61,7 @@ func (s *StoreSuite) TestIsCurrent() {
 
 	err = s.store.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 2")
+	s.Contains(err.Error(), "schema version 0, expected 3")
 	s.Contains(err.Error(), "tempogate migrate")
 }
 
@@ -72,7 +72,7 @@ func (s *StoreSuite) TestIsCurrentOnFreshDB() {
 
 	err = fresh.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 2")
+	s.Contains(err.Error(), "schema version 0, expected 3")
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
@@ -82,9 +82,9 @@ func (s *StoreSuite) TestMigrateIsIdempotent() {
 	var versions int
 	row := s.store.db.QueryRowContext(s.ctx, `SELECT count(*) FROM schema_migrations`)
 	s.Require().NoError(row.Scan(&versions))
-	s.Equal(2, versions)
+	s.Equal(3, versions)
 
-	for _, want := range []string{"keypairs", "auth_requests"} {
+	for _, want := range []string{"keypairs", "auth_requests", "auth_codes"} {
 		var table string
 		row = s.store.db.QueryRowContext(s.ctx,
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, want)
@@ -210,6 +210,91 @@ func (s *StoreSuite) TestSaveAuthRequestDuplicateInternalState() {
 		"expected ErrDuplicateInternalState, got %v", err)
 }
 
+func (s *StoreSuite) TestConsumeAuthRequestRoundTripAndSingleUse() {
+	ar := s.authRequest("consume-1")
+	s.Require().NoError(s.store.SaveAuthRequest(s.ctx, ar))
+
+	got, err := s.store.ConsumeAuthRequest(s.ctx, ar.InternalState)
+	s.Require().NoError(err)
+	s.Equal(ar.InternalState, got.InternalState)
+	s.Equal(ar.ClientID, got.ClientID)
+	s.Equal(ar.RedirectURI, got.RedirectURI)
+	s.Equal(ar.Scope, got.Scope)
+	s.Equal(ar.ClientState, got.ClientState)
+	s.Equal(ar.CodeChallenge, got.CodeChallenge)
+	s.Equal(ar.CodeChallengeMethod, got.CodeChallengeMethod)
+	s.True(ar.CreatedAt.Equal(got.CreatedAt))
+	s.True(ar.ExpiresAt.Equal(got.ExpiresAt))
+
+	_, err = s.store.ConsumeAuthRequest(s.ctx, ar.InternalState)
+	s.Require().Error(err)
+	s.Truef(errors.Is(err, oidc.ErrAuthRequestNotFound),
+		"second consume should be ErrAuthRequestNotFound, got %v", err)
+
+	var remaining int
+	row := s.store.db.QueryRowContext(s.ctx,
+		`SELECT count(*) FROM auth_requests WHERE internal_state = ?`, ar.InternalState)
+	s.Require().NoError(row.Scan(&remaining))
+	s.Zero(remaining)
+}
+
+func (s *StoreSuite) TestConsumeAuthRequestNotFound() {
+	_, err := s.store.ConsumeAuthRequest(s.ctx, "never-saved")
+	s.Require().Error(err)
+	s.Truef(errors.Is(err, oidc.ErrAuthRequestNotFound),
+		"expected ErrAuthRequestNotFound, got %v", err)
+}
+
+func (s *StoreSuite) authCode(code string) oidc.AuthCode {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	return oidc.AuthCode{
+		Code:                code,
+		ClientID:            "ui",
+		RedirectURI:         "https://app.example.com/cb",
+		Email:               "alice@example.com",
+		Scope:               "openid email",
+		CodeChallenge:       "challenge",
+		CodeChallengeMethod: "S256",
+		CreatedAt:           now,
+		ExpiresAt:           now.Add(time.Minute),
+	}
+}
+
+func (s *StoreSuite) TestSaveAuthCodeRoundTrip() {
+	ac := s.authCode("code-1")
+	s.Require().NoError(s.store.SaveAuthCode(s.ctx, ac))
+
+	var got oidc.AuthCode
+	row := s.store.db.QueryRowContext(s.ctx,
+		`SELECT code, client_id, redirect_uri, email, scope,
+		        code_challenge, code_challenge_method, created_at, expires_at
+		 FROM auth_codes WHERE code = ?`, ac.Code)
+	s.Require().NoError(row.Scan(
+		&got.Code, &got.ClientID, &got.RedirectURI, &got.Email, &got.Scope,
+		&got.CodeChallenge, &got.CodeChallengeMethod, &got.CreatedAt, &got.ExpiresAt,
+	))
+
+	s.Equal(ac.Code, got.Code)
+	s.Equal(ac.ClientID, got.ClientID)
+	s.Equal(ac.RedirectURI, got.RedirectURI)
+	s.Equal(ac.Email, got.Email)
+	s.Equal(ac.Scope, got.Scope)
+	s.Equal(ac.CodeChallenge, got.CodeChallenge)
+	s.Equal(ac.CodeChallengeMethod, got.CodeChallengeMethod)
+	s.True(ac.CreatedAt.Equal(got.CreatedAt), "createdAt: want %v got %v", ac.CreatedAt, got.CreatedAt)
+	s.True(ac.ExpiresAt.Equal(got.ExpiresAt), "expiresAt: want %v got %v", ac.ExpiresAt, got.ExpiresAt)
+}
+
+func (s *StoreSuite) TestSaveAuthCodeDuplicate() {
+	ac := s.authCode("dup-code")
+	s.Require().NoError(s.store.SaveAuthCode(s.ctx, ac))
+
+	err := s.store.SaveAuthCode(s.ctx, ac)
+	s.Require().Error(err)
+	s.Truef(errors.Is(err, ErrDuplicateAuthCode),
+		"expected ErrDuplicateAuthCode, got %v", err)
+}
+
 func (s *StoreSuite) TestPingAfterClose() {
 	store, err := New(WithPath(filepath.Join(s.T().TempDir(), "ping.db")))
 	s.Require().NoError(err)
@@ -236,6 +321,13 @@ func (s *StoreSuite) TestErrorsAfterClose() {
 		}},
 		{"SaveAuthRequest", func() error {
 			return s.store.SaveAuthRequest(s.ctx, s.authRequest("closed"))
+		}},
+		{"ConsumeAuthRequest", func() error {
+			_, err := s.store.ConsumeAuthRequest(s.ctx, "closed")
+			return err
+		}},
+		{"SaveAuthCode", func() error {
+			return s.store.SaveAuthCode(s.ctx, s.authCode("closed"))
 		}},
 		{"Migrate", func() error { return s.store.Migrate(s.ctx) }},
 	}

@@ -5,7 +5,7 @@ import (
 	"go.uber.org/fx"
 )
 
-type fxParams struct {
+type authorizeParams struct {
 	fx.In
 
 	Store AuthRequestStore
@@ -16,10 +16,10 @@ type fxParams struct {
 	GoogleAuth     string `name:"google_auth_endpoint"`
 }
 
-// newRegistrar builds the authorize endpoint and exposes it as an api
-// registrar. A malformed OIDC__CLIENTS fails graph construction here rather
-// than surfacing as a per-request error later.
-func newRegistrar(p fxParams) (func(huma.API), error) {
+// newAuthorizeRegistrar builds the /authorize endpoint. A malformed
+// OIDC__CLIENTS fails graph construction here rather than surfacing as a
+// per-request error later.
+func newAuthorizeRegistrar(p authorizeParams) (func(huma.API), error) {
 	reg, err := ParseClientRegistry(p.Clients)
 	if err != nil {
 		return nil, err
@@ -28,14 +28,40 @@ func newRegistrar(p fxParams) (func(huma.API), error) {
 	return a.Register, nil
 }
 
-// Fx contributes the /authorize registrar into the shared "api_registrars"
-// group the api package collects. The AuthRequestStore dependency is
-// satisfied by state/sqlite via fx.As(new(oidc.AuthRequestStore)).
+type callbackParams struct {
+	fx.In
+
+	Store    CallbackStore
+	Upstream Upstream
+
+	AllowedDomains string `name:"oidc_allowed_domains"`
+}
+
+// newCallbackRegistrar builds the /callback/google endpoint. The Google
+// upstream is injected as oidc.Upstream (bound by the oidc/google provider
+// via fx.As), so this package never imports oauth2/go-oidc.
+func newCallbackRegistrar(p callbackParams) func(huma.API) {
+	c := NewCallback(p.Store, p.Upstream, p.AllowedDomains)
+	return c.Register
+}
+
+// Fx contributes the /authorize and /callback/google registrars into the
+// shared "api_registrars" group the api package collects. The store and
+// upstream dependencies are satisfied by state/sqlite and oidc/google via
+// fx.As.
 func Fx() fx.Option {
-	return fx.Provide(
-		fx.Annotate(
-			newRegistrar,
-			fx.ResultTags(`group:"api_registrars"`),
+	return fx.Options(
+		fx.Provide(
+			fx.Annotate(
+				newAuthorizeRegistrar,
+				fx.ResultTags(`group:"api_registrars"`),
+			),
+		),
+		fx.Provide(
+			fx.Annotate(
+				newCallbackRegistrar,
+				fx.ResultTags(`group:"api_registrars"`),
+			),
 		),
 	)
 }

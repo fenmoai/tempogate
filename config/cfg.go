@@ -43,12 +43,29 @@ type OIDCConfig struct {
 	// so the prefix may itself contain a scheme (e.g. "ui:https://x/cb").
 	Clients string `env:"CLIENTS"`
 
+	// AllowedDomains is the v1 flat-authz gate: a comma-separated list of
+	// email domains (e.g. "example.com,corp.example.org"). The callback
+	// admits a Google identity only when its email domain matches one of
+	// these exactly. Empty means no one is allowed.
+	AllowedDomains string `env:"ALLOWED_DOMAINS"`
+
 	Google GoogleConfig `env:",prefix=GOOGLE__"`
 }
 
-// GoogleConfig is the upstream OAuth2 client tempogate uses against Google.
-// AuthEndpoint is overridable so the end-to-end test can point at a mock IdP.
+// GoogleConfig is the upstream OAuth2/OIDC client tempogate uses against
+// Google. AuthEndpoint, TokenEndpoint and IssuerURL are all overridable so
+// the end-to-end test can point the whole flow at a mock IdP.
 type GoogleConfig struct {
 	ClientID     string `env:"CLIENT_ID"`
+	ClientSecret string `env:"CLIENT_SECRET"`
 	AuthEndpoint string `env:"AUTH_ENDPOINT"`
+
+	// TokenEndpoint is where the callback exchanges the authorization code
+	// for Google's id_token.
+	TokenEndpoint string `env:"TOKEN_ENDPOINT"`
+
+	// IssuerURL is the expected `iss` of Google's id_token and the base for
+	// OIDC discovery (JWKS). The callback verifies the id_token signature
+	// against the JWKS published under this issuer.
+	IssuerURL string `env:"ISSUER_URL"`
 }

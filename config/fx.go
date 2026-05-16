@@ -15,15 +15,19 @@ import (
 type Result struct {
 	fx.Out
 
-	LogLevel           log.Level
-	HTTPListener       xloadtype.Listener `name:"http"`
-	SqlitePath         string             `name:"sqlite_path"`
-	SqliteMaxConns     int                `name:"sqlite_max_conns"`
-	SqliteBusyTimeout  time.Duration      `name:"sqlite_busy_timeout"`
-	OIDCIssuer         string             `name:"oidc_issuer"`
-	OIDCClients        string             `name:"oidc_clients"`
-	GoogleClientID     string             `name:"google_client_id"`
-	GoogleAuthEndpoint string             `name:"google_auth_endpoint"`
+	LogLevel            log.Level
+	HTTPListener        xloadtype.Listener `name:"http"`
+	SqlitePath          string             `name:"sqlite_path"`
+	SqliteMaxConns      int                `name:"sqlite_max_conns"`
+	SqliteBusyTimeout   time.Duration      `name:"sqlite_busy_timeout"`
+	OIDCIssuer          string             `name:"oidc_issuer"`
+	OIDCClients         string             `name:"oidc_clients"`
+	OIDCAllowedDomains  string             `name:"oidc_allowed_domains"`
+	GoogleClientID      string             `name:"google_client_id"`
+	GoogleClientSecret  string             `name:"google_client_secret"`
+	GoogleAuthEndpoint  string             `name:"google_auth_endpoint"`
+	GoogleTokenEndpoint string             `name:"google_token_endpoint"`
+	GoogleIssuerURL     string             `name:"google_issuer_url"`
 }
 
 func Fx() fx.Option {
@@ -31,15 +35,19 @@ func Fx() fx.Option {
 		fx.Provide(New),
 		fx.Provide(func(cfg *Config) Result {
 			return Result{
-				LogLevel:           log.Level(cfg.Log.Level),
-				HTTPListener:       cfg.HTTP.Listener,
-				SqlitePath:         cfg.State.Sqlite.Path,
-				SqliteMaxConns:     cfg.State.Sqlite.MaxConns,
-				SqliteBusyTimeout:  cfg.State.Sqlite.BusyTimeout,
-				OIDCIssuer:         cfg.OIDC.Issuer,
-				OIDCClients:        cfg.OIDC.Clients,
-				GoogleClientID:     cfg.OIDC.Google.ClientID,
-				GoogleAuthEndpoint: cfg.OIDC.Google.AuthEndpoint,
+				LogLevel:            log.Level(cfg.Log.Level),
+				HTTPListener:        cfg.HTTP.Listener,
+				SqlitePath:          cfg.State.Sqlite.Path,
+				SqliteMaxConns:      cfg.State.Sqlite.MaxConns,
+				SqliteBusyTimeout:   cfg.State.Sqlite.BusyTimeout,
+				OIDCIssuer:          cfg.OIDC.Issuer,
+				OIDCClients:         cfg.OIDC.Clients,
+				OIDCAllowedDomains:  cfg.OIDC.AllowedDomains,
+				GoogleClientID:      cfg.OIDC.Google.ClientID,
+				GoogleClientSecret:  cfg.OIDC.Google.ClientSecret,
+				GoogleAuthEndpoint:  cfg.OIDC.Google.AuthEndpoint,
+				GoogleTokenEndpoint: cfg.OIDC.Google.TokenEndpoint,
+				GoogleIssuerURL:     cfg.OIDC.Google.IssuerURL,
 			}
 		}),
 	)

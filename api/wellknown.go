@@ -57,10 +57,20 @@ type openIDOutput struct {
 	Body         openIDConfig
 }
 
+// JWKSSource is api's consumer-side view of the keypair aggregate: the only
+// behaviour the JWKS endpoint needs. *keys.Keys satisfies it structurally, so
+// api couples to this narrow contract rather than the concrete aggregate
+// (same consumer-defines-the-interface convention as oidc.AuthRequestStore /
+// keys.KeyStore). It stays exported so the fx graph can bind the concrete
+// type to it.
+type JWKSSource interface {
+	PublicJWKS() ([]keys.JWK, error)
+}
+
 // WithWellKnown registers the JWKS and OIDC discovery endpoints. issuer is
 // the externally reachable base URL relying parties use to reach tempogate;
 // jwks_uri in the discovery document is derived from it.
-func WithWellKnown(k *keys.Keys, issuer string) Option {
+func WithWellKnown(k JWKSSource, issuer string) Option {
 	return func(c *apiConfig) {
 		c.registrars = append(c.registrars, func(a huma.API) {
 			registerWellKnown(a, k, strings.TrimRight(issuer, "/"))
@@ -68,7 +78,7 @@ func WithWellKnown(k *keys.Keys, issuer string) Option {
 	}
 }
 
-func registerWellKnown(a huma.API, k *keys.Keys, issuer string) {
+func registerWellKnown(a huma.API, k JWKSSource, issuer string) {
 	huma.Register(a, huma.Operation{
 		OperationID: "jwks",
 		Method:      http.MethodGet,

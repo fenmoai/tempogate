@@ -22,9 +22,12 @@ func TestFxSuite(t *testing.T) {
 func (s *FxSuite) supplyConfig(clients string) fx.Option {
 	return fx.Options(
 		fx.Provide(func() oidc.AuthRequestStore { return &memAuthStore{} }),
+		fx.Provide(func() oidc.CallbackStore { return &memCallbackStore{} }),
+		fx.Provide(func() oidc.Upstream { return &fakeUpstream{} }),
 		fx.Supply(
 			fx.Annotated{Name: "oidc_issuer", Target: testIssuer},
 			fx.Annotated{Name: "oidc_clients", Target: clients},
+			fx.Annotated{Name: "oidc_allowed_domains", Target: "example.com"},
 			fx.Annotated{Name: "google_client_id", Target: testGoogleCID},
 			fx.Annotated{Name: "google_auth_endpoint", Target: testGoogleAuth},
 		),
@@ -46,7 +49,7 @@ func (s *FxSuite) TestProvidesRegistrarIntoGroup() {
 	app.RequireStart()
 	defer app.RequireStop()
 
-	s.Require().Len(got.Registrars, 1)
+	s.Require().Len(got.Registrars, 2)
 }
 
 func (s *FxSuite) TestMalformedClientsFailsGraph() {

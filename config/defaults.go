@@ -27,6 +27,10 @@ func defaultConfig() *Config {
 			Issuer: "http://127.0.0.1:8000",
 			Google: GoogleConfig{
 				AuthEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+				// #nosec G101 -- public Google token endpoint URL, not a
+				// credential; G101 trips on the "Token" in the field name.
+				TokenEndpoint: "https://oauth2.googleapis.com/token",
+				IssuerURL:     "https://accounts.google.com",
 			},
 		},
 	}

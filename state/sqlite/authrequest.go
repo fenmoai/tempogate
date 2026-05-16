@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -33,4 +34,29 @@ func (s *Store) SaveAuthRequest(ctx context.Context, ar oidc.AuthRequest) error 
 		return fmt.Errorf("sqlite: save auth request: %w", err)
 	}
 	return nil
+}
+
+// ConsumeAuthRequest atomically deletes and returns the pending request keyed
+// by internalState. The DELETE ... RETURNING is a single statement, so the
+// max-1-conn store cannot hand the same row to two concurrent callbacks: the
+// loser sees zero rows and gets oidc.ErrAuthRequestNotFound. Single-use falls
+// out of the same property — a replayed state finds the row already gone.
+func (s *Store) ConsumeAuthRequest(ctx context.Context, internalState string) (oidc.AuthRequest, error) {
+	var ar oidc.AuthRequest
+	err := s.db.QueryRowContext(ctx,
+		`DELETE FROM auth_requests WHERE internal_state = ?
+		 RETURNING internal_state, client_id, redirect_uri, scope, client_state,
+		           code_challenge, code_challenge_method, created_at, expires_at`,
+		internalState,
+	).Scan(
+		&ar.InternalState, &ar.ClientID, &ar.RedirectURI, &ar.Scope, &ar.ClientState,
+		&ar.CodeChallenge, &ar.CodeChallengeMethod, &ar.CreatedAt, &ar.ExpiresAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return oidc.AuthRequest{}, fmt.Errorf("%w: %s", oidc.ErrAuthRequestNotFound, internalState)
+	}
+	if err != nil {
+		return oidc.AuthRequest{}, fmt.Errorf("sqlite: consume auth request: %w", err)
+	}
+	return ar, nil
 }
