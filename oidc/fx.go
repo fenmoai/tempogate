@@ -1,8 +1,6 @@
 package oidc
 
 import (
-	"strings"
-
 	"github.com/danielgtaylor/huma/v2"
 	"go.uber.org/fx"
 )
@@ -33,35 +31,24 @@ func newAuthorizeRegistrar(p authorizeParams) (func(huma.API), error) {
 type callbackParams struct {
 	fx.In
 
-	Store CallbackStore
+	Store    CallbackStore
+	Upstream Upstream
 
-	Issuer              string `name:"oidc_issuer"`
-	AllowedDomains      string `name:"oidc_allowed_domains"`
-	GoogleClientID      string `name:"google_client_id"`
-	GoogleClientSecret  string `name:"google_client_secret"`
-	GoogleTokenEndpoint string `name:"google_token_endpoint"`
-	GoogleIssuerURL     string `name:"google_issuer_url"`
+	AllowedDomains string `name:"oidc_allowed_domains"`
 }
 
 // newCallbackRegistrar builds the /callback/google endpoint. The Google
-// upstream's OIDC discovery is lazy, so nothing here touches the network at
-// graph-construction time.
+// upstream is injected as oidc.Upstream (bound by the oidc/google provider
+// via fx.As), so this package never imports oauth2/go-oidc.
 func newCallbackRegistrar(p callbackParams) func(huma.API) {
-	redirectURL := strings.TrimRight(p.Issuer, "/") + callbackPath
-	up := NewGoogleUpstream(
-		p.GoogleClientID,
-		p.GoogleClientSecret,
-		p.GoogleTokenEndpoint,
-		redirectURL,
-		p.GoogleIssuerURL,
-	)
-	c := NewCallback(p.Store, up, p.AllowedDomains)
+	c := NewCallback(p.Store, p.Upstream, p.AllowedDomains)
 	return c.Register
 }
 
 // Fx contributes the /authorize and /callback/google registrars into the
-// shared "api_registrars" group the api package collects. The store
-// dependencies are satisfied by state/sqlite via fx.As.
+// shared "api_registrars" group the api package collects. The store and
+// upstream dependencies are satisfied by state/sqlite and oidc/google via
+// fx.As.
 func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(

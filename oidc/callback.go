@@ -47,6 +47,21 @@ type callbackOutput struct {
 	Body        []byte
 }
 
+// Upstream is the Google leg of the flow, kept behind an interface so this
+// package never imports oauth2/go-oidc: the concrete implementation lives in
+// the oidc/google provider package and is injected via fx.As, the same
+// consumer-defines-the-interface split state/sqlite uses. The handler can
+// thus be unit-tested with a fake, and the integration test points the real
+// implementation at a mock IdP.
+type Upstream interface {
+	// ExchangeAndVerify swaps a Google authorization code for an id_token,
+	// verifies its signature and claims against Google's JWKS, and returns
+	// the email it asserts. emailVerified reflects the token's
+	// `email_verified` claim — an unverified email must not be trusted by
+	// the domain gate even if the domain matches.
+	ExchangeAndVerify(ctx context.Context, code string) (email string, emailVerified bool, err error)
+}
+
 // Callback serves GET /callback/google: it completes the upstream half of the
 // flow — code exchange, domain allowlist gate, and minting our own
 // authorization code — then redirects the browser back to the downstream
@@ -90,7 +105,7 @@ func (c *Callback) Register(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID:   "callback-google",
 		Method:        http.MethodGet,
-		Path:          callbackPath,
+		Path:          CallbackPath,
 		Summary:       "Google OAuth2 callback (code exchange + domain allowlist + mint auth code)",
 		Tags:          []string{"oidc"},
 		DefaultStatus: http.StatusFound,

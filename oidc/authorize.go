@@ -16,7 +16,11 @@ import (
 
 const (
 	authorizePath = "/authorize"
-	callbackPath  = "/callback/google"
+
+	// CallbackPath is exported so the oidc/google provider can build a
+	// redirect_uri that exactly matches the one /authorize sends to Google;
+	// a mismatch makes Google reject the code exchange.
+	CallbackPath = "/callback/google"
 
 	// authRequestTTL bounds how long a pending request may sit between the
 	// downstream /authorize call and Google's round-trip back. Short enough
@@ -177,7 +181,7 @@ func (a *Authorizer) googleURL(internalState string) (string, error) {
 	}
 	q := u.Query()
 	q.Set("client_id", a.googleClient)
-	q.Set("redirect_uri", a.issuer+callbackPath)
+	q.Set("redirect_uri", a.issuer+CallbackPath)
 	q.Set("response_type", "code")
 	q.Set("scope", googleScope)
 	q.Set("state", internalState)

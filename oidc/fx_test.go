@@ -23,15 +23,13 @@ func (s *FxSuite) supplyConfig(clients string) fx.Option {
 	return fx.Options(
 		fx.Provide(func() oidc.AuthRequestStore { return &memAuthStore{} }),
 		fx.Provide(func() oidc.CallbackStore { return &memCallbackStore{} }),
+		fx.Provide(func() oidc.Upstream { return &fakeUpstream{} }),
 		fx.Supply(
 			fx.Annotated{Name: "oidc_issuer", Target: testIssuer},
 			fx.Annotated{Name: "oidc_clients", Target: clients},
 			fx.Annotated{Name: "oidc_allowed_domains", Target: "example.com"},
 			fx.Annotated{Name: "google_client_id", Target: testGoogleCID},
-			fx.Annotated{Name: "google_client_secret", Target: "secret"},
 			fx.Annotated{Name: "google_auth_endpoint", Target: testGoogleAuth},
-			fx.Annotated{Name: "google_token_endpoint", Target: "https://oauth2.googleapis.com/token"},
-			fx.Annotated{Name: "google_issuer_url", Target: "https://accounts.google.com"},
 		),
 	)
 }

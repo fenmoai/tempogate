@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/fenmoai/tempogate/oidc"
+	"github.com/fenmoai/tempogate/oidc/google"
 )
 
 const mockKID = "mock-google-key-1"
@@ -146,11 +147,11 @@ func (s *CallbackIntegrationSuite) SetupTest() {
 }
 
 func (s *CallbackIntegrationSuite) serverFor(store oidc.CallbackStore, mg *mockGoogle) *httptest.Server {
-	up := oidc.NewGoogleUpstream(
+	up := google.New(
 		mg.clientID,
 		"mock-secret",
 		mg.issuer()+"/token",
-		testIssuer+"/callback/google",
+		testIssuer+oidc.CallbackPath,
 		mg.issuer(),
 	)
 	c := oidc.NewCallback(store, up, "example.com",
