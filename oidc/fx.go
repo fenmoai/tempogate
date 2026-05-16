@@ -3,6 +3,8 @@ package oidc
 import (
 	"github.com/danielgtaylor/huma/v2"
 	"go.uber.org/fx"
+
+	"github.com/fenmoai/tempogate/keys"
 )
 
 type authorizeParams struct {
@@ -45,10 +47,25 @@ func newCallbackRegistrar(p callbackParams) func(huma.API) {
 	return c.Register
 }
 
-// Fx contributes the /authorize and /callback/google registrars into the
-// shared "api_registrars" group the api package collects. The store and
-// upstream dependencies are satisfied by state/sqlite and oidc/google via
-// fx.As.
+type tokenParams struct {
+	fx.In
+
+	Store  TokenStore
+	Signer *keys.Signer
+}
+
+// newTokenRegistrar builds the /token endpoint. The Signer is provided by
+// keys.Fx over the shared keypair aggregate; TokenStore is satisfied by
+// state/sqlite via fx.As.
+func newTokenRegistrar(p tokenParams) func(huma.API) {
+	t := NewToken(p.Store, p.Signer)
+	return t.Register
+}
+
+// Fx contributes the /authorize, /callback/google and /token registrars into
+// the shared "api_registrars" group the api package collects. The store,
+// upstream and signer dependencies are satisfied by state/sqlite, oidc/google
+// and keys via fx.As / fx.Provide.
 func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(
@@ -60,6 +77,12 @@ func Fx() fx.Option {
 		fx.Provide(
 			fx.Annotate(
 				newCallbackRegistrar,
+				fx.ResultTags(`group:"api_registrars"`),
+			),
+		),
+		fx.Provide(
+			fx.Annotate(
+				newTokenRegistrar,
 				fx.ResultTags(`group:"api_registrars"`),
 			),
 		),
