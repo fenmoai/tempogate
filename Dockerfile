@@ -20,6 +20,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 
 ENV CGO_ENABLED=0
+# jwx/v4 pulls in encoding/json/v2, still behind this experiment gate.
+ENV GOEXPERIMENT=jsonv2
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOOS=${TARGETOS} GOARCH=${TARGETARCH} \

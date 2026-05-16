@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lestrrat-go/jwx/v2/jwa"
-	"github.com/lestrrat-go/jwx/v2/jwk"
-	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/lestrrat-go/jwx/v4/jwa"
+	"github.com/lestrrat-go/jwx/v4/jwk"
+	"github.com/lestrrat-go/jwx/v4/jwt"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -59,7 +59,7 @@ func (s *KeysSuite) TestGenerateKeypairProducesUsableRSA() {
 	s.NotEmpty(kp.PublicPEM)
 
 	// Public PEM round-trips via jwx and matches the kid we baked in.
-	pubKey, err := jwk.ParseKey(kp.PublicPEM, jwk.WithPEM(true))
+	pubKey, err := jwk.ParseKey(kp.PublicPEM, jwk.WithX509(true))
 	s.Require().NoError(err)
 
 	thumb, err := pubKey.Thumbprint(crypto.SHA256)
@@ -160,9 +160,9 @@ func (s *KeysSuite) TestSignVerifyRoundTrip() {
 	kp, err := loader.Latest()
 	s.Require().NoError(err)
 
-	privKey, err := jwk.ParseKey(kp.PrivatePEM, jwk.WithPEM(true))
+	privKey, err := jwk.ParseKey(kp.PrivatePEM, jwk.WithX509(true))
 	s.Require().NoError(err)
-	pubKey, err := jwk.ParseKey(kp.PublicPEM, jwk.WithPEM(true))
+	pubKey, err := jwk.ParseKey(kp.PublicPEM, jwk.WithX509(true))
 	s.Require().NoError(err)
 
 	token, err := jwt.NewBuilder().
@@ -173,26 +173,30 @@ func (s *KeysSuite) TestSignVerifyRoundTrip() {
 		Build()
 	s.Require().NoError(err)
 
-	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256, privKey))
+	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256(), privKey))
 	s.Require().NoError(err)
 
 	clock := jwt.ClockFunc(func() time.Time { return s.now.Add(time.Minute) })
 	parsed, err := jwt.Parse(signed,
-		jwt.WithKey(jwa.RS256, pubKey),
+		jwt.WithKey(jwa.RS256(), pubKey),
 		jwt.WithClock(clock),
 	)
 	s.Require().NoError(err)
-	s.Equal("tempogate", parsed.Issuer())
-	s.Equal("operator", parsed.Subject())
+	iss, ok := parsed.Issuer()
+	s.Require().True(ok)
+	s.Equal("tempogate", iss)
+	sub, ok := parsed.Subject()
+	s.Require().True(ok)
+	s.Equal("operator", sub)
 
 	// Verify mismatched key fails — guards against any silent same-key
 	// shortcut in jwt.Parse.
 	otherKp, err := GenerateKeypair(WithRSABits(2048))
 	s.Require().NoError(err)
-	otherPub, err := jwk.ParseKey(otherKp.PublicPEM, jwk.WithPEM(true))
+	otherPub, err := jwk.ParseKey(otherKp.PublicPEM, jwk.WithX509(true))
 	s.Require().NoError(err)
 	_, err = jwt.Parse(signed,
-		jwt.WithKey(jwa.RS256, otherPub),
+		jwt.WithKey(jwa.RS256(), otherPub),
 		jwt.WithClock(clock),
 	)
 	s.Require().Error(err)

@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v4/jwk"
 )
 
 const (
@@ -87,7 +87,7 @@ func GenerateKeypair(opts ...GenerateOption) (Keypair, error) {
 		Bytes: pubBytes,
 	})
 
-	pubJWK, err := jwk.FromRaw(&priv.PublicKey)
+	pubJWK, err := jwk.Import[jwk.Key](&priv.PublicKey)
 	if err != nil {
 		return Keypair{}, fmt.Errorf("keys: build jwk: %w", err)
 	}

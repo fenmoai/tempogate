@@ -6,6 +6,11 @@ BIN         := $(BIN_DIR)/tempogate
 PKG         := github.com/fenmoai/tempogate
 BUILDINFO   := $(PKG)/buildinfo
 
+# github.com/lestrrat-go/jwx/v4 imports encoding/json/v2, which is gated
+# behind GOEXPERIMENT=jsonv2 until it graduates from experimental. Exported
+# so every recipe (build, vet, test, lint, run) compiles the same way.
+export GOEXPERIMENT := jsonv2
+
 # Pin tool versions so CI and local installs agree. Bump deliberately.
 GCI_VERSION           ?= v0.14.0
 GOLANGCI_LINT_VERSION ?= v2.12.2

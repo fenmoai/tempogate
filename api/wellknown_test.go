@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/lestrrat-go/jwx/v2/jwa"
-	"github.com/lestrrat-go/jwx/v2/jwk"
-	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/lestrrat-go/jwx/v4/jwa"
+	"github.com/lestrrat-go/jwx/v4/jwk"
+	"github.com/lestrrat-go/jwx/v4/jwt"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/fenmoai/tempogate/api"
@@ -160,7 +160,7 @@ func (s *WellKnownSuite) mintJWT(now time.Time) string {
 	kp, err := s.keys.Latest()
 	s.Require().NoError(err)
 
-	privKey, err := jwk.ParseKey(kp.PrivatePEM, jwk.WithPEM(true))
+	privKey, err := jwk.ParseKey(kp.PrivatePEM, jwk.WithX509(true))
 	s.Require().NoError(err)
 	s.Require().NoError(privKey.Set(jwk.KeyIDKey, kp.Kid))
 
@@ -173,7 +173,7 @@ func (s *WellKnownSuite) mintJWT(now time.Time) string {
 		Build()
 	s.Require().NoError(err)
 
-	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.RS256, privKey))
+	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.RS256(), privKey))
 	s.Require().NoError(err)
 	return string(signed)
 }

@@ -100,7 +100,10 @@ make test          # check + race + coverage
 make ci            # what GitHub Actions runs
 ```
 
-Go 1.26+ required. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Go 1.26+ required. A dependency (`lestrrat-go/jwx/v4`) uses `encoding/json/v2`,
+so builds need `GOEXPERIMENT=jsonv2` — the `make` targets export it for you; set
+it yourself if you invoke `go build`/`go test` directly. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Security
 

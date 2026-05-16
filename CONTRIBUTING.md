@@ -21,6 +21,10 @@ For security vulnerabilities, **do not open a public issue.** Use [GitHub Securi
 You need:
 
 - Go (version pinned in [`go.mod`](go.mod) — currently 1.26.x)
+- `GOEXPERIMENT=jsonv2` — the `lestrrat-go/jwx/v4` dependency imports
+  `encoding/json/v2`, still gated behind this experiment. The `make`
+  targets export it automatically; only set it by hand if you run
+  `go build`/`go test` directly.
 - Docker (only if you want to test the container build)
 
 Then:
