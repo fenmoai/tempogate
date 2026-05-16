@@ -42,7 +42,11 @@ func (s *ConfigSuite) TestNew() {
 				},
 				OIDC: OIDCConfig{
 					Issuer: "http://127.0.0.1:8000",
-					Google: GoogleConfig{AuthEndpoint: "https://accounts.google.com/o/oauth2/v2/auth"},
+					Google: GoogleConfig{
+						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
+						TokenEndpoint: "https://oauth2.googleapis.com/token",
+						IssuerURL:     "https://accounts.google.com",
+					},
 				},
 			},
 		},
@@ -69,7 +73,11 @@ func (s *ConfigSuite) TestNew() {
 				},
 				OIDC: OIDCConfig{
 					Issuer: "http://127.0.0.1:8000",
-					Google: GoogleConfig{AuthEndpoint: "https://accounts.google.com/o/oauth2/v2/auth"},
+					Google: GoogleConfig{
+						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
+						TokenEndpoint: "https://oauth2.googleapis.com/token",
+						IssuerURL:     "https://accounts.google.com",
+					},
 				},
 			},
 		},
@@ -97,7 +105,11 @@ func (s *ConfigSuite) TestNew() {
 				},
 				OIDC: OIDCConfig{
 					Issuer: "http://127.0.0.1:8000",
-					Google: GoogleConfig{AuthEndpoint: "https://accounts.google.com/o/oauth2/v2/auth"},
+					Google: GoogleConfig{
+						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
+						TokenEndpoint: "https://oauth2.googleapis.com/token",
+						IssuerURL:     "https://accounts.google.com",
+					},
 				},
 			},
 		},
@@ -123,7 +135,11 @@ func (s *ConfigSuite) TestNew() {
 				},
 				OIDC: OIDCConfig{
 					Issuer: "https://tempogate.internal.example.com",
-					Google: GoogleConfig{AuthEndpoint: "https://accounts.google.com/o/oauth2/v2/auth"},
+					Google: GoogleConfig{
+						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
+						TokenEndpoint: "https://oauth2.googleapis.com/token",
+						IssuerURL:     "https://accounts.google.com",
+					},
 				},
 			},
 		},
@@ -153,8 +169,45 @@ func (s *ConfigSuite) TestNew() {
 					Issuer:  "http://127.0.0.1:8000",
 					Clients: "ui:https://temporal.example.com/auth/sso/callback,cli:http://127.0.0.1",
 					Google: GoogleConfig{
-						ClientID:     "google-client-123.apps.googleusercontent.com",
-						AuthEndpoint: "http://127.0.0.1:9999/mock/auth",
+						ClientID:      "google-client-123.apps.googleusercontent.com",
+						AuthEndpoint:  "http://127.0.0.1:9999/mock/auth",
+						TokenEndpoint: "https://oauth2.googleapis.com/token",
+						IssuerURL:     "https://accounts.google.com",
+					},
+				},
+			},
+		},
+		{
+			name: "callback allowlist and google credentials overridden by env",
+			env: map[string]string{
+				"OIDC__ALLOWED_DOMAINS":        "example.com,corp.example.org",
+				"OIDC__GOOGLE__CLIENT_SECRET":  "gocspx-secret",
+				"OIDC__GOOGLE__TOKEN_ENDPOINT": "http://127.0.0.1:9999/mock/token",
+				"OIDC__GOOGLE__ISSUER_URL":     "http://127.0.0.1:9999",
+			},
+			want: &Config{
+				Log: LogConfig{Level: "info"},
+				HTTP: HTTPConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8000,
+					},
+				},
+				State: StateConfig{
+					Sqlite: SqliteConfig{
+						Path:        "/var/lib/tempogate/state.db",
+						MaxConns:    1,
+						BusyTimeout: 5 * time.Second,
+					},
+				},
+				OIDC: OIDCConfig{
+					Issuer:         "http://127.0.0.1:8000",
+					AllowedDomains: "example.com,corp.example.org",
+					Google: GoogleConfig{
+						ClientSecret:  "gocspx-secret",
+						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
+						TokenEndpoint: "http://127.0.0.1:9999/mock/token",
+						IssuerURL:     "http://127.0.0.1:9999",
 					},
 				},
 			},
