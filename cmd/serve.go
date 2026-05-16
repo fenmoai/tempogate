@@ -26,6 +26,13 @@ func newServeCmd(p RunParams) *cobra.Command {
 				return err
 			}
 
+			// Load (or bootstrap) the signing keypair before the listener
+			// binds so /.well-known/jwks.json serves the active key from the
+			// first accepted request.
+			if err := p.Keys.Init(ctx); err != nil {
+				return fmt.Errorf("keys init: %w", err)
+			}
+
 			mux := http.NewServeMux()
 			if p.API.Prefix == "" {
 				mux.Handle("/", p.API.Handler)

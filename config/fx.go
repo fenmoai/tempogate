@@ -20,6 +20,7 @@ type Result struct {
 	SqlitePath        string             `name:"sqlite_path"`
 	SqliteMaxConns    int                `name:"sqlite_max_conns"`
 	SqliteBusyTimeout time.Duration      `name:"sqlite_busy_timeout"`
+	OIDCIssuer        string             `name:"oidc_issuer"`
 }
 
 func Fx() fx.Option {
@@ -32,6 +33,7 @@ func Fx() fx.Option {
 				SqlitePath:        cfg.State.Sqlite.Path,
 				SqliteMaxConns:    cfg.State.Sqlite.MaxConns,
 				SqliteBusyTimeout: cfg.State.Sqlite.BusyTimeout,
+				OIDCIssuer:        cfg.OIDC.Issuer,
 			}
 		}),
 	)

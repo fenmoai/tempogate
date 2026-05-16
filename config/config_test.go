@@ -40,6 +40,7 @@ func (s *ConfigSuite) TestNew() {
 						BusyTimeout: 5 * time.Second,
 					},
 				},
+				OIDC: OIDCConfig{Issuer: "http://127.0.0.1:8000"},
 			},
 		},
 		{
@@ -63,6 +64,7 @@ func (s *ConfigSuite) TestNew() {
 						BusyTimeout: 5 * time.Second,
 					},
 				},
+				OIDC: OIDCConfig{Issuer: "http://127.0.0.1:8000"},
 			},
 		},
 		{
@@ -87,6 +89,30 @@ func (s *ConfigSuite) TestNew() {
 						BusyTimeout: 2 * time.Second,
 					},
 				},
+				OIDC: OIDCConfig{Issuer: "http://127.0.0.1:8000"},
+			},
+		},
+		{
+			name: "oidc issuer overridden by env",
+			env: map[string]string{
+				"OIDC__ISSUER": "https://tempogate.internal.example.com",
+			},
+			want: &Config{
+				Log: LogConfig{Level: "info"},
+				HTTP: HTTPConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8000,
+					},
+				},
+				State: StateConfig{
+					Sqlite: SqliteConfig{
+						Path:        "/var/lib/tempogate/state.db",
+						MaxConns:    1,
+						BusyTimeout: 5 * time.Second,
+					},
+				},
+				OIDC: OIDCConfig{Issuer: "https://tempogate.internal.example.com"},
 			},
 		},
 	}

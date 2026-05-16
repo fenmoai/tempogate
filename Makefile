@@ -21,7 +21,7 @@ LDFLAGS := -s -w \
 	-X '$(BUILDINFO).gitCommit=$(GIT_COMMIT)' \
 	-X '$(BUILDINFO).buildDate=$(BUILD_DATE)'
 
-.PHONY: start build fmt vet lint imports check tidy test test-run ci gen-oas clean help tools \
+.PHONY: start build fmt vet lint imports imports-check check tidy test test-run ci gen-oas clean help tools \
         gci golangci-lint
 
 start: ## Run the binary directly with build-info ldflags injected
@@ -43,10 +43,21 @@ lint: golangci-lint ## golangci-lint run
 imports: gci ## gci write with std/default/local groupings
 	$(GCI) write --skip-generated -s standard -s default -s "prefix($(PKG))" .
 
-check: fmt vet imports ## fmt + vet + imports; fails if git diff is non-empty
-	@if ! git diff --quiet --exit-code; then \
-		echo "check: working tree dirty after fmt/vet/imports"; \
-		git --no-pager diff --stat; \
+GO_SRC = $(shell find . -name '*.go' -not -path './.bin/*')
+
+check: vet imports-check ## vet + assert gofmt/gci would not rewrite any .go file
+	@bad=$$(gofmt -l $(GO_SRC)); \
+	if [ -n "$$bad" ]; then \
+		echo "check: these files are not gofmt-clean — run 'make fmt':"; \
+		echo "$$bad"; \
+		exit 1; \
+	fi
+
+imports-check: gci ## assert gci import grouping is already applied
+	@d=$$($(GCI) diff --skip-generated -s standard -s default -s "prefix($(PKG))" .); \
+	if [ -n "$$d" ]; then \
+		echo "check: import grouping is off — run 'make imports':"; \
+		echo "$$d"; \
 		exit 1; \
 	fi
 
@@ -61,7 +72,7 @@ test: check test-run ## check + test-run
 ci: check lint test-run ## fmt/vet/imports + lint + tests (used by GitHub Actions)
 	@go tool cover -func=coverage.out | tail -1
 
-gen-oas: build ## emit OpenAPI spec (subcommand lands with E1.3)
+gen-oas: build ## emit OpenAPI spec (subcommand not yet implemented)
 	$(BIN) gen-oas -f yaml > api/openapi.yaml
 
 tools: gci golangci-lint ## install pinned dev tools into $(BIN_DIR)

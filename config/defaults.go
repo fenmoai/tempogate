@@ -23,5 +23,8 @@ func defaultConfig() *Config {
 				BusyTimeout: 5 * time.Second,
 			},
 		},
+		OIDC: OIDCConfig{
+			Issuer: "http://127.0.0.1:8000",
+		},
 	}
 }

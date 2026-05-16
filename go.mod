@@ -3,6 +3,7 @@ module github.com/fenmoai/tempogate
 go 1.26.3
 
 require (
+	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/danielgtaylor/huma/v2 v2.37.3
 	github.com/gojekfarm/xrun v0.4.0
 	github.com/gojekfarm/xtools/xload v0.10.0
@@ -21,6 +22,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
@@ -50,6 +52,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
+	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect

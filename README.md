@@ -33,7 +33,7 @@ A single binary, distroless-shipped, with subcommands `serve`, `login`, `keys`, 
 
 ## Quick start
 
-> **Status:** v0 — only `/healthz` and `/readyz` are wired. OIDC endpoints land in subsequent epics.
+> **Status:** v0 — `/healthz`, `/readyz`, `/.well-known/jwks.json`, and a partial `/.well-known/openid-configuration` are wired. The SSO flow endpoints (authorize / token / userinfo) land in subsequent releases.
 
 Once a release is cut, pull a tagged multi-arch image:
 
@@ -76,8 +76,9 @@ Configuration is layered: defaults → optional `application.yaml` → environme
 | ---------------- | ---------------- | ------------------------------------ |
 | `LOG__LEVEL`     | `info`           | `debug` / `info` / `warn` / `error`  |
 | `HTTP__LISTENER` | `127.0.0.1:8000` | `host:port` for the public listener |
+| `OIDC__ISSUER`   | `http://127.0.0.1:8000` | Externally reachable base URL; advertised as `issuer` and used to derive `jwks_uri` in the discovery document (e.g. `https://tempogate.internal.<domain>`) |
 
-More keys (admin listener, JWKS storage, upstream Google client) arrive with their respective epics.
+More keys (admin listener, JWKS storage, upstream Google client) arrive with their respective releases.
 
 ## Why not a sidecar proxy or a forked Temporal?
 
