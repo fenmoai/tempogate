@@ -13,12 +13,18 @@ import (
 // replayed state is indistinguishable from a forged one to the caller.
 var ErrAuthRequestNotFound = errors.New("oidc: auth request not found")
 
+// ErrAuthCodeNotFound is returned by ConsumeAuthCode when no code matches —
+// because it was never issued, has already been redeemed (single-use), or
+// its row was reaped. The /token handler maps this to OAuth2 invalid_grant
+// without distinguishing the cases, so a replayed code is indistinguishable
+// from a forged one to the caller.
+var ErrAuthCodeNotFound = errors.New("oidc: auth code not found")
+
 // AuthCode is the authorization code tempogate mints after Google has
 // authenticated the user and the email passed the domain allowlist. It is
-// single-use and short-lived: the downstream /token call (a later epic)
-// exchanges it — together with the PKCE verifier matching CodeChallenge —
-// for a signed JWT. Email is the verified upstream identity flat authz keys
-// off in v1.
+// single-use and short-lived: the downstream /token call exchanges it —
+// together with the PKCE verifier matching CodeChallenge — for a signed JWT.
+// Email is the verified upstream identity flat authz keys off in v1.
 type AuthCode struct {
 	Code                string
 	ClientID            string

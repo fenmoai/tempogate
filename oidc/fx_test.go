@@ -8,6 +8,7 @@ import (
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxtest"
 
+	"github.com/fenmoai/tempogate/keys"
 	"github.com/fenmoai/tempogate/oidc"
 )
 
@@ -23,7 +24,9 @@ func (s *FxSuite) supplyConfig(clients string) fx.Option {
 	return fx.Options(
 		fx.Provide(func() oidc.AuthRequestStore { return &memAuthStore{} }),
 		fx.Provide(func() oidc.CallbackStore { return &memCallbackStore{} }),
+		fx.Provide(func() oidc.TokenStore { return newMemTokenStore() }),
 		fx.Provide(func() oidc.Upstream { return &fakeUpstream{} }),
+		fx.Provide(func() *keys.Signer { return keys.NewSigner() }),
 		fx.Supply(
 			fx.Annotated{Name: "oidc_issuer", Target: testIssuer},
 			fx.Annotated{Name: "oidc_clients", Target: clients},
@@ -49,7 +52,7 @@ func (s *FxSuite) TestProvidesRegistrarIntoGroup() {
 	app.RequireStart()
 	defer app.RequireStop()
 
-	s.Require().Len(got.Registrars, 2)
+	s.Require().Len(got.Registrars, 3)
 }
 
 func (s *FxSuite) TestMalformedClientsFailsGraph() {

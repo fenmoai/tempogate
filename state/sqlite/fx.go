@@ -38,8 +38,8 @@ func newFx(p Params) (*Store, error) {
 
 // Fx registers the sqlite store as *Store (for direct callers like
 // cmd/serve.go) plus every consumer-side interface it satisfies
-// (keys.KeyStore, oidc.AuthRequestStore, oidc.CallbackStore), using a single
-// underlying constructor.
+// (keys.KeyStore, oidc.AuthRequestStore, oidc.CallbackStore, oidc.TokenStore),
+// using a single underlying constructor.
 func Fx() fx.Option {
 	return fx.Provide(
 		fx.Annotate(
@@ -47,6 +47,7 @@ func Fx() fx.Option {
 			fx.As(new(keys.KeyStore)),
 			fx.As(new(oidc.AuthRequestStore)),
 			fx.As(new(oidc.CallbackStore)),
+			fx.As(new(oidc.TokenStore)),
 			fx.As(fx.Self()),
 		),
 	)
