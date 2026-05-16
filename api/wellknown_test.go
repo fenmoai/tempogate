@@ -106,7 +106,7 @@ func (s *WellKnownSuite) TestJWKSDocumentShape() {
 	s.NotEmpty(k["e"])
 }
 
-func (s *WellKnownSuite) TestOpenIDConfigurationStub() {
+func (s *WellKnownSuite) TestOpenIDConfigurationIsFullyPopulated() {
 	resp, err := http.Get(s.srv.URL + "/.well-known/openid-configuration")
 	s.Require().NoError(err)
 	defer resp.Body.Close()
@@ -115,14 +115,31 @@ func (s *WellKnownSuite) TestOpenIDConfigurationStub() {
 	s.Equal("public, max-age=300", resp.Header.Get("Cache-Control"))
 
 	var doc struct {
-		Issuer                 string   `json:"issuer"`
-		JwksURI                string   `json:"jwks_uri"`
-		ResponseTypesSupported []string `json:"response_types_supported"`
+		Issuer                           string   `json:"issuer"`
+		AuthorizationEndpoint            string   `json:"authorization_endpoint"`
+		TokenEndpoint                    string   `json:"token_endpoint"`
+		UserinfoEndpoint                 string   `json:"userinfo_endpoint"`
+		JwksURI                          string   `json:"jwks_uri"`
+		ResponseTypesSupported           []string `json:"response_types_supported"`
+		GrantTypesSupported              []string `json:"grant_types_supported"`
+		CodeChallengeMethodsSupported    []string `json:"code_challenge_methods_supported"`
+		ScopesSupported                  []string `json:"scopes_supported"`
+		SubjectTypesSupported            []string `json:"subject_types_supported"`
+		IDTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported"`
 	}
 	s.Require().NoError(json.NewDecoder(resp.Body).Decode(&doc))
+
 	s.Equal(s.issuer, doc.Issuer)
+	s.Equal(s.issuer+"/authorize", doc.AuthorizationEndpoint)
+	s.Equal(s.issuer+"/token", doc.TokenEndpoint)
+	s.Equal(s.issuer+"/userinfo", doc.UserinfoEndpoint)
 	s.Equal(s.issuer+"/.well-known/jwks.json", doc.JwksURI)
-	s.Contains(doc.ResponseTypesSupported, "code")
+	s.Equal([]string{"code"}, doc.ResponseTypesSupported)
+	s.Equal([]string{"authorization_code", "refresh_token"}, doc.GrantTypesSupported)
+	s.Equal([]string{"S256"}, doc.CodeChallengeMethodsSupported)
+	s.Equal([]string{"openid", "profile", "email"}, doc.ScopesSupported)
+	s.Equal([]string{"public"}, doc.SubjectTypesSupported)
+	s.Equal([]string{"RS256"}, doc.IDTokenSigningAlgValuesSupported)
 }
 
 // TestGoOIDCRemoteKeySetVerifiesMintedJWT is the acceptance criterion: a

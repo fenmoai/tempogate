@@ -66,12 +66,14 @@ func (s *TokenE2ESuite) SetupTest() {
 	authorizer := oidc.New(store, reg, testIssuer, testGoogleCID, s.mg.issuer()+"/auth")
 	callback := oidc.NewCallback(store, upstream, "example.com")
 	token := oidc.NewToken(store, signer)
+	userinfo := oidc.NewUserInfo(keys.NewVerifier(keys.WithKeys(k), keys.WithIssuer(testIssuer)))
 
 	result := api.New(api.NewReadiness(),
 		api.WithWellKnown(k, testIssuer),
 		api.WithRegistrar(authorizer.Register),
 		api.WithRegistrar(callback.Register),
 		api.WithRegistrar(token.Register),
+		api.WithRegistrar(userinfo.Register),
 	)
 	s.srv = httptest.NewServer(result.Handler)
 	s.T().Cleanup(s.srv.Close)
@@ -198,6 +200,28 @@ func (s *TokenE2ESuite) TestFullFlowMintsJWTVerifiableAgainstPublishedJWKS() {
 	iat, ok := tok.IssuedAt()
 	s.Require().True(ok)
 	s.InDelta(float64(4*time.Hour), float64(exp.Sub(iat)), float64(time.Second))
+
+	// /userinfo closes the OIDC loop: the same access token authenticates
+	// the call and yields the session's display claims.
+	uiReq, err := http.NewRequest(http.MethodGet, s.srv.URL+"/userinfo", http.NoBody)
+	s.Require().NoError(err)
+	uiReq.Header.Set("Authorization", "Bearer "+body.AccessToken)
+	uiResp, err := s.client.Do(uiReq)
+	s.Require().NoError(err)
+	defer uiResp.Body.Close()
+	s.Require().Equal(http.StatusOK, uiResp.StatusCode)
+
+	var ui struct {
+		Sub           string `json:"sub"`
+		Email         string `json:"email"`
+		EmailVerified bool   `json:"email_verified"`
+		Name          string `json:"name"`
+	}
+	s.Require().NoError(json.NewDecoder(uiResp.Body).Decode(&ui))
+	s.Equal("alice@example.com", ui.Sub)
+	s.Equal("alice@example.com", ui.Email)
+	s.True(ui.EmailVerified)
+	s.Equal("alice", ui.Name)
 
 	// Refresh-token grant: a new, equally valid JWT against the same JWKS.
 	rf := url.Values{}
