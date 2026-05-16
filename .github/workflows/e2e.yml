@@ -1,0 +1,48 @@
+name: e2e
+
+# The container-backed Web UI SSO acceptance proof. Kept in its own workflow
+# (not folded into `ci`) so the fast unit job stays fast and an e2e failure is
+# isolated and independently visible. Builds the tempogate + mock-Google
+# images and runs temporalio/ui, temporal-frontend, postgres and headless
+# Chrome via testcontainers.
+#
+# Runs always on `main`. On pull requests it is skipped by default (the run is
+# heavy — multi-container, image pulls, a browser) and executes only when the
+# PR carries the `e2e:true` label. Adding the label triggers it via the
+# `labeled` event; it then keeps running on subsequent pushes while the label
+# is present.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: web-ui sso e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # main: always. PRs: only when explicitly opted in with the e2e:true label.
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e:true')
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # ubuntu-latest ships a working Docker daemon, which testcontainers
+      # drives directly; no extra service container is needed.
+      - name: Run Web UI SSO e2e
+        run: make test-e2e
