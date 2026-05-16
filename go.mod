@@ -8,6 +8,7 @@ require (
 	github.com/gojekfarm/xrun v0.4.0
 	github.com/gojekfarm/xtools/xload v0.10.0
 	github.com/gojekfarm/xtools/xload/providers/viper v0.10.0
+	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/jwx/v4 v4.0.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
@@ -22,7 +23,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lestrrat-go/dsig v1.3.0 // indirect
