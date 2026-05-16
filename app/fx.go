@@ -14,6 +14,7 @@ import (
 	"github.com/fenmoai/tempogate/config"
 	"github.com/fenmoai/tempogate/keys"
 	"github.com/fenmoai/tempogate/log"
+	"github.com/fenmoai/tempogate/oidc"
 	"github.com/fenmoai/tempogate/state/sqlite"
 )
 
@@ -42,6 +43,7 @@ func New(opts ...Option) fx.Option {
 		}),
 		sqlite.Fx(),
 		keys.Fx(),
+		oidc.Fx(),
 		api.Fx(),
 		cmd.Fx(),
 	}

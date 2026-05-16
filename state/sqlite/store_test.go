@@ -14,6 +14,7 @@ import (
 	"github.com/fenmoai/tempogate/config"
 	"github.com/fenmoai/tempogate/keys"
 	tlog "github.com/fenmoai/tempogate/log"
+	"github.com/fenmoai/tempogate/oidc"
 )
 
 type StoreSuite struct {
@@ -60,7 +61,7 @@ func (s *StoreSuite) TestIsCurrent() {
 
 	err = s.store.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 1")
+	s.Contains(err.Error(), "schema version 0, expected 2")
 	s.Contains(err.Error(), "tempogate migrate")
 }
 
@@ -71,7 +72,7 @@ func (s *StoreSuite) TestIsCurrentOnFreshDB() {
 
 	err = fresh.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 1")
+	s.Contains(err.Error(), "schema version 0, expected 2")
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
@@ -81,13 +82,15 @@ func (s *StoreSuite) TestMigrateIsIdempotent() {
 	var versions int
 	row := s.store.db.QueryRowContext(s.ctx, `SELECT count(*) FROM schema_migrations`)
 	s.Require().NoError(row.Scan(&versions))
-	s.Equal(1, versions)
+	s.Equal(2, versions)
 
-	var table string
-	row = s.store.db.QueryRowContext(s.ctx,
-		`SELECT name FROM sqlite_master WHERE type='table' AND name='keypairs'`)
-	s.Require().NoError(row.Scan(&table))
-	s.Equal("keypairs", table)
+	for _, want := range []string{"keypairs", "auth_requests"} {
+		var table string
+		row = s.store.db.QueryRowContext(s.ctx,
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, want)
+		s.Require().NoError(row.Scan(&table))
+		s.Equal(want, table)
+	}
 }
 
 func (s *StoreSuite) TestKeypairRoundTrip() {
@@ -157,6 +160,56 @@ func (s *StoreSuite) TestSaveKeypairDuplicateKid() {
 		"expected ErrDuplicateKid, got %v", err)
 }
 
+func (s *StoreSuite) authRequest(internalState string) oidc.AuthRequest {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	return oidc.AuthRequest{
+		InternalState:       internalState,
+		ClientID:            "ui",
+		RedirectURI:         "https://app.example.com/cb",
+		Scope:               "openid email",
+		ClientState:         "client-xyz",
+		CodeChallenge:       "challenge",
+		CodeChallengeMethod: "S256",
+		CreatedAt:           now,
+		ExpiresAt:           now.Add(5 * time.Minute),
+	}
+}
+
+func (s *StoreSuite) TestSaveAuthRequestRoundTrip() {
+	ar := s.authRequest("istate-1")
+	s.Require().NoError(s.store.SaveAuthRequest(s.ctx, ar))
+
+	var got oidc.AuthRequest
+	row := s.store.db.QueryRowContext(s.ctx,
+		`SELECT internal_state, client_id, redirect_uri, scope, client_state,
+		        code_challenge, code_challenge_method, created_at, expires_at
+		 FROM auth_requests WHERE internal_state = ?`, ar.InternalState)
+	s.Require().NoError(row.Scan(
+		&got.InternalState, &got.ClientID, &got.RedirectURI, &got.Scope, &got.ClientState,
+		&got.CodeChallenge, &got.CodeChallengeMethod, &got.CreatedAt, &got.ExpiresAt,
+	))
+
+	s.Equal(ar.InternalState, got.InternalState)
+	s.Equal(ar.ClientID, got.ClientID)
+	s.Equal(ar.RedirectURI, got.RedirectURI)
+	s.Equal(ar.Scope, got.Scope)
+	s.Equal(ar.ClientState, got.ClientState)
+	s.Equal(ar.CodeChallenge, got.CodeChallenge)
+	s.Equal(ar.CodeChallengeMethod, got.CodeChallengeMethod)
+	s.True(ar.CreatedAt.Equal(got.CreatedAt), "createdAt: want %v got %v", ar.CreatedAt, got.CreatedAt)
+	s.True(ar.ExpiresAt.Equal(got.ExpiresAt), "expiresAt: want %v got %v", ar.ExpiresAt, got.ExpiresAt)
+}
+
+func (s *StoreSuite) TestSaveAuthRequestDuplicateInternalState() {
+	ar := s.authRequest("dup-state")
+	s.Require().NoError(s.store.SaveAuthRequest(s.ctx, ar))
+
+	err := s.store.SaveAuthRequest(s.ctx, ar)
+	s.Require().Error(err)
+	s.Truef(errors.Is(err, ErrDuplicateInternalState),
+		"expected ErrDuplicateInternalState, got %v", err)
+}
+
 func (s *StoreSuite) TestPingAfterClose() {
 	store, err := New(WithPath(filepath.Join(s.T().TempDir(), "ping.db")))
 	s.Require().NoError(err)
@@ -180,6 +233,9 @@ func (s *StoreSuite) TestErrorsAfterClose() {
 		{"LoadKeypairs", func() error {
 			_, err := s.store.LoadKeypairs(s.ctx)
 			return err
+		}},
+		{"SaveAuthRequest", func() error {
+			return s.store.SaveAuthRequest(s.ctx, s.authRequest("closed"))
 		}},
 		{"Migrate", func() error { return s.store.Migrate(s.ctx) }},
 	}

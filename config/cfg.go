@@ -31,9 +31,24 @@ type SqliteConfig struct {
 	BusyTimeout time.Duration `env:"BUSY_TIMEOUT"`
 }
 
-// OIDCConfig carries the externally reachable identity of this server. Issuer
-// is the base URL relying parties (Temporal Web UI, frontend) use to reach
-// tempogate; the discovery doc's jwks_uri is derived from it.
+// OIDCConfig carries the externally reachable identity of this server and the
+// upstream Google IdP it federates to. Issuer is the base URL relying parties
+// (Temporal Web UI, frontend) use to reach tempogate; the discovery doc's
+// jwks_uri is derived from it.
 type OIDCConfig struct {
 	Issuer string `env:"ISSUER"`
+
+	// Clients is the v1 client registry: a comma-separated list of
+	// "id:redirect_uri_prefix" entries. The first ':' splits id from prefix,
+	// so the prefix may itself contain a scheme (e.g. "ui:https://x/cb").
+	Clients string `env:"CLIENTS"`
+
+	Google GoogleConfig `env:",prefix=GOOGLE__"`
+}
+
+// GoogleConfig is the upstream OAuth2 client tempogate uses against Google.
+// AuthEndpoint is overridable so the end-to-end test can point at a mock IdP.
+type GoogleConfig struct {
+	ClientID     string `env:"CLIENT_ID"`
+	AuthEndpoint string `env:"AUTH_ENDPOINT"`
 }

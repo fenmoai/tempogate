@@ -49,7 +49,7 @@ func (s *ServeCmdSuite) TestRejectsStaleSchema() {
 
 	err := cmd.ExecuteContext(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 1")
+	s.Contains(err.Error(), "schema version 0, expected 2")
 	s.Contains(err.Error(), "tempogate migrate")
 }
 

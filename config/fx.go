@@ -15,12 +15,15 @@ import (
 type Result struct {
 	fx.Out
 
-	LogLevel          log.Level
-	HTTPListener      xloadtype.Listener `name:"http"`
-	SqlitePath        string             `name:"sqlite_path"`
-	SqliteMaxConns    int                `name:"sqlite_max_conns"`
-	SqliteBusyTimeout time.Duration      `name:"sqlite_busy_timeout"`
-	OIDCIssuer        string             `name:"oidc_issuer"`
+	LogLevel           log.Level
+	HTTPListener       xloadtype.Listener `name:"http"`
+	SqlitePath         string             `name:"sqlite_path"`
+	SqliteMaxConns     int                `name:"sqlite_max_conns"`
+	SqliteBusyTimeout  time.Duration      `name:"sqlite_busy_timeout"`
+	OIDCIssuer         string             `name:"oidc_issuer"`
+	OIDCClients        string             `name:"oidc_clients"`
+	GoogleClientID     string             `name:"google_client_id"`
+	GoogleAuthEndpoint string             `name:"google_auth_endpoint"`
 }
 
 func Fx() fx.Option {
@@ -28,12 +31,15 @@ func Fx() fx.Option {
 		fx.Provide(New),
 		fx.Provide(func(cfg *Config) Result {
 			return Result{
-				LogLevel:          log.Level(cfg.Log.Level),
-				HTTPListener:      cfg.HTTP.Listener,
-				SqlitePath:        cfg.State.Sqlite.Path,
-				SqliteMaxConns:    cfg.State.Sqlite.MaxConns,
-				SqliteBusyTimeout: cfg.State.Sqlite.BusyTimeout,
-				OIDCIssuer:        cfg.OIDC.Issuer,
+				LogLevel:           log.Level(cfg.Log.Level),
+				HTTPListener:       cfg.HTTP.Listener,
+				SqlitePath:         cfg.State.Sqlite.Path,
+				SqliteMaxConns:     cfg.State.Sqlite.MaxConns,
+				SqliteBusyTimeout:  cfg.State.Sqlite.BusyTimeout,
+				OIDCIssuer:         cfg.OIDC.Issuer,
+				OIDCClients:        cfg.OIDC.Clients,
+				GoogleClientID:     cfg.OIDC.Google.ClientID,
+				GoogleAuthEndpoint: cfg.OIDC.Google.AuthEndpoint,
 			}
 		}),
 	)

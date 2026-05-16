@@ -7,6 +7,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/fenmoai/tempogate/keys"
+	"github.com/fenmoai/tempogate/oidc"
 )
 
 type Params struct {
@@ -35,14 +36,16 @@ func newFx(p Params) (*Store, error) {
 	return s, nil
 }
 
-// Fx registers the sqlite store as both *Store (for direct callers like
-// cmd/serve.go) and keys.KeyStore (for consumer-side interface injection in
-// the keys package), using a single underlying constructor.
+// Fx registers the sqlite store as *Store (for direct callers like
+// cmd/serve.go) plus every consumer-side interface it satisfies
+// (keys.KeyStore, oidc.AuthRequestStore), using a single underlying
+// constructor.
 func Fx() fx.Option {
 	return fx.Provide(
 		fx.Annotate(
 			newFx,
 			fx.As(new(keys.KeyStore)),
+			fx.As(new(oidc.AuthRequestStore)),
 			fx.As(fx.Self()),
 		),
 	)

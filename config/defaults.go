@@ -25,6 +25,9 @@ func defaultConfig() *Config {
 		},
 		OIDC: OIDCConfig{
 			Issuer: "http://127.0.0.1:8000",
+			Google: GoogleConfig{
+				AuthEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+			},
 		},
 	}
 }
