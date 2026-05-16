@@ -62,6 +62,7 @@ type authorizeInput struct {
 	State               string `query:"state"`
 	CodeChallenge       string `query:"code_challenge"`
 	CodeChallengeMethod string `query:"code_challenge_method"`
+	Nonce               string `query:"nonce"`
 }
 
 // authorizeOutput carries only a status + Location: huma writes a 302 with no
@@ -142,10 +143,18 @@ func (a *Authorizer) handle(ctx context.Context, in *authorizeInput) (*authorize
 	if !scopeContains(in.Scope, "openid") {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_scope", "scope must include openid")
 	}
+	// PKCE posture (see docs/pkce-and-confidential-clients.md): mandatory for
+	// every public client, exactly as OAuth 2.1 / RFC 9700 require. The sole
+	// relaxation is a registered *confidential* client (one with a secret),
+	// which may omit code_challenge because it instead authenticates that
+	// secret at /token. PKCE is still enforced for a confidential client that
+	// does send a challenge — the carve-out only widens, never weakens, when
+	// a challenge is absent.
 	if in.CodeChallenge == "" {
-		return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code_challenge is required (PKCE)")
-	}
-	if in.CodeChallengeMethod != "S256" {
+		if !a.clients.IsConfidential(in.ClientID) {
+			return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code_challenge is required (PKCE)")
+		}
+	} else if in.CodeChallengeMethod != "S256" {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code_challenge_method must be S256")
 	}
 
@@ -163,6 +172,7 @@ func (a *Authorizer) handle(ctx context.Context, in *authorizeInput) (*authorize
 		ClientState:         in.State,
 		CodeChallenge:       in.CodeChallenge,
 		CodeChallengeMethod: in.CodeChallengeMethod,
+		Nonce:               in.Nonce,
 		CreatedAt:           now,
 		ExpiresAt:           now.Add(authRequestTTL),
 	}

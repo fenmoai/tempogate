@@ -21,10 +21,10 @@ func (s *Store) SaveAuthCode(ctx context.Context, ac oidc.AuthCode) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO auth_codes
 		   (code, client_id, redirect_uri, email, scope,
-		    code_challenge, code_challenge_method, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    code_challenge, code_challenge_method, nonce, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ac.Code, ac.ClientID, ac.RedirectURI, ac.Email, ac.Scope,
-		ac.CodeChallenge, ac.CodeChallengeMethod, ac.CreatedAt, ac.ExpiresAt,
+		ac.CodeChallenge, ac.CodeChallengeMethod, ac.Nonce, ac.CreatedAt, ac.ExpiresAt,
 	)
 	if err != nil {
 		var sqliteErr *sqlite3.Error
@@ -47,11 +47,11 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code string) (oidc.AuthCode
 	err := s.db.QueryRowContext(ctx,
 		`DELETE FROM auth_codes WHERE code = ?
 		 RETURNING code, client_id, redirect_uri, email, scope,
-		           code_challenge, code_challenge_method, created_at, expires_at`,
+		           code_challenge, code_challenge_method, nonce, created_at, expires_at`,
 		code,
 	).Scan(
 		&ac.Code, &ac.ClientID, &ac.RedirectURI, &ac.Email, &ac.Scope,
-		&ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.CreatedAt, &ac.ExpiresAt,
+		&ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.Nonce, &ac.CreatedAt, &ac.ExpiresAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return oidc.AuthCode{}, fmt.Errorf("%w: %s", oidc.ErrAuthCodeNotFound, code)

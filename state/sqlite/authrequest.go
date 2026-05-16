@@ -21,10 +21,10 @@ func (s *Store) SaveAuthRequest(ctx context.Context, ar oidc.AuthRequest) error 
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO auth_requests
 		   (internal_state, client_id, redirect_uri, scope, client_state,
-		    code_challenge, code_challenge_method, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    code_challenge, code_challenge_method, nonce, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ar.InternalState, ar.ClientID, ar.RedirectURI, ar.Scope, ar.ClientState,
-		ar.CodeChallenge, ar.CodeChallengeMethod, ar.CreatedAt, ar.ExpiresAt,
+		ar.CodeChallenge, ar.CodeChallengeMethod, ar.Nonce, ar.CreatedAt, ar.ExpiresAt,
 	)
 	if err != nil {
 		var sqliteErr *sqlite3.Error
@@ -46,11 +46,11 @@ func (s *Store) ConsumeAuthRequest(ctx context.Context, internalState string) (o
 	err := s.db.QueryRowContext(ctx,
 		`DELETE FROM auth_requests WHERE internal_state = ?
 		 RETURNING internal_state, client_id, redirect_uri, scope, client_state,
-		           code_challenge, code_challenge_method, created_at, expires_at`,
+		           code_challenge, code_challenge_method, nonce, created_at, expires_at`,
 		internalState,
 	).Scan(
 		&ar.InternalState, &ar.ClientID, &ar.RedirectURI, &ar.Scope, &ar.ClientState,
-		&ar.CodeChallenge, &ar.CodeChallengeMethod, &ar.CreatedAt, &ar.ExpiresAt,
+		&ar.CodeChallenge, &ar.CodeChallengeMethod, &ar.Nonce, &ar.CreatedAt, &ar.ExpiresAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return oidc.AuthRequest{}, fmt.Errorf("%w: %s", oidc.ErrAuthRequestNotFound, internalState)

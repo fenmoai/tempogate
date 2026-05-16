@@ -41,7 +41,17 @@ type OIDCConfig struct {
 	// Clients is the v1 client registry: a comma-separated list of
 	// "id:redirect_uri_prefix" entries. The first ':' splits id from prefix,
 	// so the prefix may itself contain a scheme (e.g. "ui:https://x/cb").
+	// Every client declared here is public: PKCE is mandatory.
 	Clients string `env:"CLIENTS"`
+
+	// ClientSecrets is the deliberately-separate opt-in for the confidential
+	// PKCE carve-out: a comma-separated list of "id:secret" for clients in
+	// Clients that authenticate at /token with a shared secret and do not
+	// implement PKCE (e.g. the Temporal Web UI). Keeping it out of CLIENTS
+	// makes the relaxation explicit and auditable; an entry for an
+	// unregistered id fails fast. Empty ⇒ every client stays public. See
+	// docs/pkce-and-confidential-clients.md.
+	ClientSecrets string `env:"CLIENT_SECRETS"`
 
 	// AllowedDomains is the v1 flat-authz gate: a comma-separated list of
 	// email domains (e.g. "example.com,corp.example.org"). The callback

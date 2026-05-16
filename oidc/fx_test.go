@@ -31,6 +31,7 @@ func (s *FxSuite) supplyConfig(clients string) fx.Option {
 		fx.Supply(
 			fx.Annotated{Name: "oidc_issuer", Target: testIssuer},
 			fx.Annotated{Name: "oidc_clients", Target: clients},
+			fx.Annotated{Name: "oidc_client_secrets", Target: ""},
 			fx.Annotated{Name: "oidc_allowed_domains", Target: "example.com"},
 			fx.Annotated{Name: "google_client_id", Target: testGoogleCID},
 			fx.Annotated{Name: "google_auth_endpoint", Target: testGoogleAuth},

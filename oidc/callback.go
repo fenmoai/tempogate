@@ -165,6 +165,7 @@ func (c *Callback) handle(ctx context.Context, in *callbackInput) (*callbackOutp
 		Scope:               ar.Scope,
 		CodeChallenge:       ar.CodeChallenge,
 		CodeChallengeMethod: ar.CodeChallengeMethod,
+		Nonce:               ar.Nonce,
 		CreatedAt:           now,
 		ExpiresAt:           now.Add(authCodeTTL),
 	}); err != nil {
