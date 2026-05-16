@@ -136,6 +136,29 @@ func (s *UserInfoSuite) TestWrongIssuerIs401() {
 	s.Equal(http.StatusUnauthorized, resp.StatusCode)
 }
 
+func (s *UserInfoSuite) TestTokenWithoutSubjectIs401() {
+	// Email set but Subject empty: the token verifies, yet there is no
+	// identity to describe, so the handler rejects it.
+	tok := s.mint(keys.MintRequest{Email: "alice@example.com", TTL: time.Hour})
+
+	resp := s.get("Bearer " + tok)
+	defer resp.Body.Close()
+	s.Equal(http.StatusUnauthorized, resp.StatusCode)
+}
+
+func (s *UserInfoSuite) TestNameUsesWholeEmailWhenNoLocalPartSeparator() {
+	tok := s.mint(keys.MintRequest{Subject: "svc-1", Email: "mailbox", TTL: time.Hour})
+
+	resp := s.get("Bearer " + tok)
+	defer resp.Body.Close()
+
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+	body := s.decodeBody(resp)
+	s.Equal("svc-1", body["sub"])
+	s.Equal("mailbox", body["email"])
+	s.Equal("mailbox", body["name"], "no '@' ⇒ the whole email is the name")
+}
+
 func (s *UserInfoSuite) TestMalformedOrMissingAuthorizationIs401() {
 	cases := []struct {
 		name   string
