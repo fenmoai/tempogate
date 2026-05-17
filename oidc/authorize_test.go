@@ -154,6 +154,79 @@ func (s *AuthorizeSuite) TestValidRequestPersistsAuthRequestWithTTL() {
 	s.Equal(5*time.Minute, ar.ExpiresAt.Sub(ar.CreatedAt))
 }
 
+// confidentialSrv builds an /authorize server whose registry has `ui` public
+// and `webui` confidential (a secret), so the PKCE carve-out can be exercised
+// against the same shared store.
+func (s *AuthorizeSuite) confidentialSrv() *httptest.Server {
+	reg, err := oidc.ParseClientRegistry("ui:https://app.example.com/auth,webui:" + testRedirectURI)
+	s.Require().NoError(err)
+	s.Require().NoError(reg.WithSecrets("webui:ui-secret"))
+
+	a := oidc.New(s.store, reg, testIssuer, testGoogleCID, testGoogleAuth,
+		oidc.WithClock(func() time.Time { return fixedNow }),
+		oidc.WithStateGenerator(func() (string, error) { return fixedState, nil }),
+	)
+	mux := http.NewServeMux()
+	a.Register(humago.New(mux, huma.DefaultConfig("test", "0.0.0")))
+	srv := httptest.NewServer(mux)
+	s.T().Cleanup(srv.Close)
+	return srv
+}
+
+func (s *AuthorizeSuite) TestConfidentialClientMayOmitPKCE() {
+	srv := s.confidentialSrv()
+	q := validParams()
+	q.Set("client_id", "webui")
+	q.Del("code_challenge")
+	q.Del("code_challenge_method")
+
+	resp := s.get(srv, q)
+	defer resp.Body.Close()
+
+	s.Require().Equal(http.StatusFound, resp.StatusCode)
+	s.Require().Equal(1, s.store.count())
+	ar := s.store.only()
+	s.Equal("webui", ar.ClientID)
+	s.Empty(ar.CodeChallenge, "confidential client completes /authorize with no PKCE challenge")
+}
+
+func (s *AuthorizeSuite) TestPublicClientStillRequiresPKCEEvenWhereCarveOutExists() {
+	srv := s.confidentialSrv()
+	q := validParams() // client_id=ui, which stays public
+	q.Del("code_challenge")
+
+	resp := s.get(srv, q)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusBadRequest, resp.StatusCode)
+	s.Zero(s.store.count())
+}
+
+func (s *AuthorizeSuite) TestConfidentialClientWithChallengeStillEnforcesS256() {
+	srv := s.confidentialSrv()
+	q := validParams()
+	q.Set("client_id", "webui")
+	q.Set("code_challenge_method", "plain")
+
+	resp := s.get(srv, q)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusBadRequest, resp.StatusCode, "PKCE is still enforced when a confidential client sends a challenge")
+	s.Zero(s.store.count())
+}
+
+func (s *AuthorizeSuite) TestNoncePersistedIntoAuthRequest() {
+	q := validParams()
+	q.Set("nonce", "rp-nonce-123")
+
+	resp := s.get(s.srv, q)
+	defer resp.Body.Close()
+
+	s.Require().Equal(http.StatusFound, resp.StatusCode)
+	s.Require().Equal(1, s.store.count())
+	s.Equal("rp-nonce-123", s.store.only().Nonce)
+}
+
 func (s *AuthorizeSuite) TestInvalidRequestsReturnOAuth2Errors() {
 	cases := []struct {
 		name      string

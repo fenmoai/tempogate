@@ -61,7 +61,7 @@ func (s *StoreSuite) TestIsCurrent() {
 
 	err = s.store.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 4")
+	s.Contains(err.Error(), "schema version 0, expected 5")
 	s.Contains(err.Error(), "tempogate migrate")
 }
 
@@ -72,7 +72,7 @@ func (s *StoreSuite) TestIsCurrentOnFreshDB() {
 
 	err = fresh.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 4")
+	s.Contains(err.Error(), "schema version 0, expected 5")
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
@@ -82,7 +82,7 @@ func (s *StoreSuite) TestMigrateIsIdempotent() {
 	var versions int
 	row := s.store.db.QueryRowContext(s.ctx, `SELECT count(*) FROM schema_migrations`)
 	s.Require().NoError(row.Scan(&versions))
-	s.Equal(4, versions)
+	s.Equal(5, versions)
 
 	for _, want := range []string{"keypairs", "auth_requests", "auth_codes", "refresh_tokens"} {
 		var table string
@@ -170,6 +170,7 @@ func (s *StoreSuite) authRequest(internalState string) oidc.AuthRequest {
 		ClientState:         "client-xyz",
 		CodeChallenge:       "challenge",
 		CodeChallengeMethod: "S256",
+		Nonce:               "n-once",
 		CreatedAt:           now,
 		ExpiresAt:           now.Add(5 * time.Minute),
 	}
@@ -182,11 +183,11 @@ func (s *StoreSuite) TestSaveAuthRequestRoundTrip() {
 	var got oidc.AuthRequest
 	row := s.store.db.QueryRowContext(s.ctx,
 		`SELECT internal_state, client_id, redirect_uri, scope, client_state,
-		        code_challenge, code_challenge_method, created_at, expires_at
+		        code_challenge, code_challenge_method, nonce, created_at, expires_at
 		 FROM auth_requests WHERE internal_state = ?`, ar.InternalState)
 	s.Require().NoError(row.Scan(
 		&got.InternalState, &got.ClientID, &got.RedirectURI, &got.Scope, &got.ClientState,
-		&got.CodeChallenge, &got.CodeChallengeMethod, &got.CreatedAt, &got.ExpiresAt,
+		&got.CodeChallenge, &got.CodeChallengeMethod, &got.Nonce, &got.CreatedAt, &got.ExpiresAt,
 	))
 
 	s.Equal(ar.InternalState, got.InternalState)
@@ -196,6 +197,7 @@ func (s *StoreSuite) TestSaveAuthRequestRoundTrip() {
 	s.Equal(ar.ClientState, got.ClientState)
 	s.Equal(ar.CodeChallenge, got.CodeChallenge)
 	s.Equal(ar.CodeChallengeMethod, got.CodeChallengeMethod)
+	s.Equal(ar.Nonce, got.Nonce)
 	s.True(ar.CreatedAt.Equal(got.CreatedAt), "createdAt: want %v got %v", ar.CreatedAt, got.CreatedAt)
 	s.True(ar.ExpiresAt.Equal(got.ExpiresAt), "expiresAt: want %v got %v", ar.ExpiresAt, got.ExpiresAt)
 }
@@ -223,6 +225,7 @@ func (s *StoreSuite) TestConsumeAuthRequestRoundTripAndSingleUse() {
 	s.Equal(ar.ClientState, got.ClientState)
 	s.Equal(ar.CodeChallenge, got.CodeChallenge)
 	s.Equal(ar.CodeChallengeMethod, got.CodeChallengeMethod)
+	s.Equal(ar.Nonce, got.Nonce)
 	s.True(ar.CreatedAt.Equal(got.CreatedAt))
 	s.True(ar.ExpiresAt.Equal(got.ExpiresAt))
 
@@ -255,6 +258,7 @@ func (s *StoreSuite) authCode(code string) oidc.AuthCode {
 		Scope:               "openid email",
 		CodeChallenge:       "challenge",
 		CodeChallengeMethod: "S256",
+		Nonce:               "n-once",
 		CreatedAt:           now,
 		ExpiresAt:           now.Add(time.Minute),
 	}
@@ -267,11 +271,11 @@ func (s *StoreSuite) TestSaveAuthCodeRoundTrip() {
 	var got oidc.AuthCode
 	row := s.store.db.QueryRowContext(s.ctx,
 		`SELECT code, client_id, redirect_uri, email, scope,
-		        code_challenge, code_challenge_method, created_at, expires_at
+		        code_challenge, code_challenge_method, nonce, created_at, expires_at
 		 FROM auth_codes WHERE code = ?`, ac.Code)
 	s.Require().NoError(row.Scan(
 		&got.Code, &got.ClientID, &got.RedirectURI, &got.Email, &got.Scope,
-		&got.CodeChallenge, &got.CodeChallengeMethod, &got.CreatedAt, &got.ExpiresAt,
+		&got.CodeChallenge, &got.CodeChallengeMethod, &got.Nonce, &got.CreatedAt, &got.ExpiresAt,
 	))
 
 	s.Equal(ac.Code, got.Code)
@@ -281,6 +285,7 @@ func (s *StoreSuite) TestSaveAuthCodeRoundTrip() {
 	s.Equal(ac.Scope, got.Scope)
 	s.Equal(ac.CodeChallenge, got.CodeChallenge)
 	s.Equal(ac.CodeChallengeMethod, got.CodeChallengeMethod)
+	s.Equal(ac.Nonce, got.Nonce)
 	s.True(ac.CreatedAt.Equal(got.CreatedAt), "createdAt: want %v got %v", ac.CreatedAt, got.CreatedAt)
 	s.True(ac.ExpiresAt.Equal(got.ExpiresAt), "expiresAt: want %v got %v", ac.ExpiresAt, got.ExpiresAt)
 }
@@ -308,6 +313,7 @@ func (s *StoreSuite) TestConsumeAuthCodeRoundTripAndSingleUse() {
 	s.Equal(ac.Scope, got.Scope)
 	s.Equal(ac.CodeChallenge, got.CodeChallenge)
 	s.Equal(ac.CodeChallengeMethod, got.CodeChallengeMethod)
+	s.Equal(ac.Nonce, got.Nonce)
 	s.True(ac.CreatedAt.Equal(got.CreatedAt))
 	s.True(ac.ExpiresAt.Equal(got.ExpiresAt))
 

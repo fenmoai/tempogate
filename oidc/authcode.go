@@ -33,8 +33,14 @@ type AuthCode struct {
 	Scope               string
 	CodeChallenge       string
 	CodeChallengeMethod string
-	CreatedAt           time.Time
-	ExpiresAt           time.Time
+
+	// Nonce is carried from the AuthRequest so /token can stamp it into the
+	// ID token's nonce claim (OIDC Core §2). Empty when the client sent no
+	// nonce at /authorize.
+	Nonce string
+
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
 // CallbackStore is the consumer-side state interface for the /callback/google

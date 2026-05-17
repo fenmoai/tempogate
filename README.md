@@ -33,7 +33,7 @@ A single binary, distroless-shipped, with subcommands `serve`, `login`, `keys`, 
 
 ## Quick start
 
-> **Status:** v0 — `/healthz`, `/readyz`, `/.well-known/jwks.json`, and a partial `/.well-known/openid-configuration` are wired. The SSO flow endpoints (authorize / token / userinfo) land in subsequent releases.
+> **Status:** v0 — health/readiness, `/.well-known/jwks.json`, the full `/.well-known/openid-configuration`, and the OIDC SSO flow (`/authorize`, `/callback/google`, `/token`, `/userinfo`) are wired. PKCE is mandatory by default with a narrow, secret-gated carve-out for older-style confidential clients such as the Temporal Web UI — see [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md).
 
 Once a release is cut, pull a tagged multi-arch image:
 
@@ -98,7 +98,14 @@ make check         # fmt + vet + gci; fails on dirty tree
 make lint          # golangci-lint
 make test          # check + race + coverage
 make ci            # what GitHub Actions runs
+make test-e2e      # container-backed Web UI SSO acceptance proof (needs Docker)
 ```
+
+`make test-e2e` stands up `temporalio/ui`, a JWKS-backed `temporal-frontend`,
+a mock Google IdP and headless Chrome via testcontainers, then drives a real
+browser login end to end and asserts the minted JWT authenticates a gRPC
+`ListNamespaces`. It is behind a `//go:build e2e` tag and a dedicated CI job,
+so the default `make ci` stays fast.
 
 Go 1.26+ required. A dependency (`lestrrat-go/jwx/v4`) uses `encoding/json/v2`,
 so builds need `GOEXPERIMENT=jsonv2` — the `make` targets export it for you; set

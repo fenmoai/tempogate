@@ -27,6 +27,10 @@ import (
 // a real sqlite store, real signing keys, and the access token verified
 // against the JWKS the server actually publishes. No fakes for the store,
 // the signer, or the verification path.
+// e2eConfidentialSecret is the shared secret for the older-style confidential
+// client the no-PKCE flow exercises (the Temporal Web UI's class of client).
+const e2eConfidentialSecret = "e2e-confidential-secret"
+
 type TokenE2ESuite struct {
 	suite.Suite
 
@@ -60,12 +64,13 @@ func (s *TokenE2ESuite) SetupTest() {
 		s.mg.issuer(),
 	)
 
-	reg, err := oidc.ParseClientRegistry("ui:https://app.example.com/auth")
+	reg, err := oidc.ParseClientRegistry("ui:https://app.example.com/auth,webui:https://app.example.com/auth")
 	s.Require().NoError(err)
+	s.Require().NoError(reg.WithSecrets("webui:" + e2eConfidentialSecret))
 
 	authorizer := oidc.New(store, reg, testIssuer, testGoogleCID, s.mg.issuer()+"/auth")
 	callback := oidc.NewCallback(store, upstream, "example.com")
-	token := oidc.NewToken(store, signer)
+	token := oidc.NewToken(store, signer, reg)
 	userinfo := oidc.NewUserInfo(keys.NewVerifier(keys.WithKeys(k), keys.WithIssuer(testIssuer)))
 
 	result := api.New(api.NewReadiness(),
@@ -193,7 +198,7 @@ func (s *TokenE2ESuite) TestFullFlowMintsJWTVerifiableAgainstPublishedJWKS() {
 
 	perms, ok := tok.Field("permissions")
 	s.Require().True(ok)
-	s.Equal([]string{"*:admin"}, toStringSlice(s.T(), perms))
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), perms))
 
 	exp, ok := tok.Expiration()
 	s.Require().True(ok)
@@ -240,7 +245,7 @@ func (s *TokenE2ESuite) TestFullFlowMintsJWTVerifiableAgainstPublishedJWKS() {
 	s.Require().NoError(err)
 	rPerms, ok := rTok.Field("permissions")
 	s.Require().True(ok)
-	s.Equal([]string{"*:admin"}, toStringSlice(s.T(), rPerms))
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), rPerms))
 }
 
 func (s *TokenE2ESuite) TestConsumedCodeCannotBeReplayed() {
@@ -273,4 +278,91 @@ func (s *TokenE2ESuite) TestPKCEMismatchRejectedEndToEnd() {
 	resp := s.tokenRequest(f)
 	defer resp.Body.Close()
 	s.Equal(http.StatusBadRequest, resp.StatusCode)
+}
+
+// runConfidentialFlow drives /authorize → mock Google → /callback for the
+// confidential client: no PKCE challenge, a nonce instead — exactly the shape
+// the Temporal Web UI's OIDC client produces. It returns the auth code.
+func (s *TokenE2ESuite) runConfidentialFlow(nonce string) string {
+	q := url.Values{}
+	q.Set("response_type", "code")
+	q.Set("client_id", "webui")
+	q.Set("redirect_uri", testRedirectURI)
+	q.Set("scope", "openid email")
+	q.Set("state", "client-state-conf")
+	q.Set("nonce", nonce)
+
+	authResp, err := s.client.Get(s.srv.URL + "/authorize?" + q.Encode())
+	s.Require().NoError(err)
+	authResp.Body.Close()
+	s.Require().Equal(http.StatusFound, authResp.StatusCode,
+		"confidential client must clear /authorize with no PKCE challenge")
+
+	toGoogle, err := url.Parse(authResp.Header.Get("Location"))
+	s.Require().NoError(err)
+	internalState := toGoogle.Query().Get("state")
+	s.Require().NotEmpty(internalState)
+
+	cbResp, err := s.client.Get(s.srv.URL + "/callback/google?code=real-google-code&state=" + internalState)
+	s.Require().NoError(err)
+	cbResp.Body.Close()
+	s.Require().Equal(http.StatusFound, cbResp.StatusCode)
+
+	backToClient, err := url.Parse(cbResp.Header.Get("Location"))
+	s.Require().NoError(err)
+	code := backToClient.Query().Get("code")
+	s.Require().NotEmpty(code)
+	return code
+}
+
+// TestConfidentialNoPKCEFlowMintsNonceAudJWT is the unit-level proof of the
+// whole Temporal-Web-UI interop: a confidential client completes the flow
+// without PKCE, authenticates at /token with HTTP Basic, and the minted JWT
+// verifies against the published JWKS with iss + aud(=client_id) + nonce —
+// the exact checks go-oidc performs inside the real UI.
+func (s *TokenE2ESuite) TestConfidentialNoPKCEFlowMintsNonceAudJWT() {
+	const nonce = "ui-supplied-nonce-123"
+	code := s.runConfidentialFlow(nonce)
+
+	f := url.Values{}
+	f.Set("grant_type", "authorization_code")
+	f.Set("code", code)
+	f.Set("redirect_uri", testRedirectURI)
+	// client_id + secret travel in the Basic header, as x/oauth2 sends them.
+	req, err := http.NewRequest(http.MethodPost, s.srv.URL+"/token", strings.NewReader(f.Encode()))
+	s.Require().NoError(err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape("webui"), url.QueryEscape(e2eConfidentialSecret))
+	resp, err := s.client.Do(req)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+
+	body := s.decode(resp)
+	tok, err := jwt.Parse([]byte(body.IDToken),
+		jwt.WithKeySet(s.jwksSet()),
+		jwt.WithIssuer(testIssuer),
+		jwt.WithAudience("webui"),
+	)
+	s.Require().NoError(err, "JWT must verify with iss + aud=client_id, as the Temporal UI's go-oidc does")
+
+	gotNonce, ok := tok.Field("nonce")
+	s.Require().True(ok)
+	s.Equal(nonce, gotNonce, "nonce must round-trip so the UI's idToken.Nonce check passes")
+
+	perms, ok := tok.Field("permissions")
+	s.Require().True(ok)
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), perms))
+
+	// A wrong secret on the same flow is rejected as invalid_client.
+	code2 := s.runConfidentialFlow(nonce)
+	f2 := url.Values{}
+	f2.Set("grant_type", "authorization_code")
+	f2.Set("code", code2)
+	f2.Set("redirect_uri", testRedirectURI)
+	f2.Set("client_id", "webui")
+	f2.Set("client_secret", "wrong")
+	bad := s.tokenRequest(f2)
+	defer bad.Body.Close()
+	s.Equal(http.StatusUnauthorized, bad.StatusCode)
 }

@@ -187,6 +187,41 @@ func (s *SignerSuite) TestMintOmitsEmailWhenEmpty() {
 	s.False(tok.Has("email"))
 }
 
+// TestMintPerRequestAudienceOverridesGlobal proves an OIDC ID token can carry
+// the requesting client_id as aud even though this Signer was built with a
+// different global audience ("temporal") — the /token handler relies on this
+// so each client's token validates against its own client_id.
+func (s *SignerSuite) TestMintPerRequestAudienceOverridesGlobal() {
+	r := s.req()
+	r.Audience = "temporal-ui-client"
+	signed, _, err := s.signer.Mint(s.ctx, r)
+	s.Require().NoError(err)
+
+	tok := s.parseWithLatestPublicKey(signed)
+	aud, ok := tok.Audience()
+	s.Require().True(ok)
+	s.Equal([]string{"temporal-ui-client"}, aud, "per-request audience must win over the Signer's global one")
+}
+
+// TestMintStampsNonceWhenPresent covers the OIDC Core §2 round-trip: a nonce
+// the relying party sent at /authorize must come back as the nonce claim, and
+// must be absent when none was requested (the refresh path).
+func (s *SignerSuite) TestMintStampsNonceWhenPresent() {
+	r := s.req()
+	r.Nonce = "rp-supplied-nonce"
+	signed, _, err := s.signer.Mint(s.ctx, r)
+	s.Require().NoError(err)
+	tok := s.parseWithLatestPublicKey(signed)
+	got, err := jwt.Get[string](tok, "nonce")
+	s.Require().NoError(err)
+	s.Equal("rp-supplied-nonce", got)
+
+	signed, _, err = s.signer.Mint(s.ctx, s.req())
+	s.Require().NoError(err)
+	tok = s.parseWithLatestPublicKey(signed)
+	s.False(tok.Has("nonce"), "no nonce claim when the request carried none")
+}
+
 func (s *SignerSuite) TestMintWithoutKeysReturnsError() {
 	_, _, err := NewSigner().Mint(s.ctx, s.req())
 	s.Require().ErrorIs(err, ErrNoSigningKeys)

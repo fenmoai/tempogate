@@ -22,6 +22,7 @@ type Result struct {
 	SqliteBusyTimeout   time.Duration      `name:"sqlite_busy_timeout"`
 	OIDCIssuer          string             `name:"oidc_issuer"`
 	OIDCClients         string             `name:"oidc_clients"`
+	OIDCClientSecrets   string             `name:"oidc_client_secrets"`
 	OIDCAllowedDomains  string             `name:"oidc_allowed_domains"`
 	GoogleClientID      string             `name:"google_client_id"`
 	GoogleClientSecret  string             `name:"google_client_secret"`
@@ -42,6 +43,7 @@ func Fx() fx.Option {
 				SqliteBusyTimeout:   cfg.State.Sqlite.BusyTimeout,
 				OIDCIssuer:          cfg.OIDC.Issuer,
 				OIDCClients:         cfg.OIDC.Clients,
+				OIDCClientSecrets:   cfg.OIDC.ClientSecrets,
 				OIDCAllowedDomains:  cfg.OIDC.AllowedDomains,
 				GoogleClientID:      cfg.OIDC.Google.ClientID,
 				GoogleClientSecret:  cfg.OIDC.Google.ClientSecret,

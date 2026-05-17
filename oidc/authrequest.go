@@ -24,8 +24,14 @@ type AuthRequest struct {
 	ClientState         string
 	CodeChallenge       string
 	CodeChallengeMethod string
-	CreatedAt           time.Time
-	ExpiresAt           time.Time
+
+	// Nonce is the OIDC `nonce` the downstream client sent at /authorize, if
+	// any. It is carried through to the minted ID token's nonce claim
+	// (OIDC Core §2); empty when the client did not request one.
+	Nonce string
+
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
 // AuthRequestStore is the consumer-side state interface for this package (see

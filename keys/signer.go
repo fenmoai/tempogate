@@ -20,9 +20,13 @@ var ErrNoSigningKeys = errors.New("keys: signer has no keypair to sign with")
 // []string of "<namespace>:<action>" (plus "system:<role>") entries. emailClaim
 // is the OIDC-standard end-user identifier; tempogate carries it for human
 // tokens so downstream audit can attribute actions without a second lookup.
+// nonceClaim is the OIDC Core §2 binding: when a relying party sends `nonce`
+// at /authorize the provider MUST echo it into the ID token so the RP can
+// detect token replay/injection.
 const (
 	permissionsClaim = "permissions"
 	emailClaim       = "email"
+	nonceClaim       = "nonce"
 )
 
 // tokenConfig is the shared construction state for Signer and Verifier: both
@@ -107,6 +111,17 @@ type MintRequest struct {
 	Permissions []string
 	TTL         time.Duration
 	Email       string
+
+	// Nonce, when non-empty, is echoed into the `nonce` claim. OIDC Core §2
+	// requires this whenever the relying party sent a nonce at /authorize;
+	// the RP rejects an ID token whose nonce does not match.
+	Nonce string
+
+	// Audience, when non-empty, overrides the Signer's configured audience
+	// for this token. OIDC Core requires an ID token's `aud` to contain the
+	// requesting client's client_id, so the /token handler sets this
+	// per-request rather than relying on a single global audience.
+	Audience string
 }
 
 // Mint builds, signs, and serializes a JWT for req. It returns the compact
@@ -153,7 +168,13 @@ func (s *Signer) Mint(_ context.Context, req MintRequest) (string, string, error
 	if s.issuer != "" {
 		b.Issuer(s.issuer)
 	}
-	if s.audience != "" {
+	// Per-request audience wins over the Signer's global one: an OIDC ID
+	// token's aud must be the requesting client_id, which only the caller
+	// knows. Falling back to s.audience preserves the integration-key path
+	// where a single fixed audience is configured.
+	if req.Audience != "" {
+		b.Audience([]string{req.Audience})
+	} else if s.audience != "" {
 		b.Audience([]string{s.audience})
 	}
 	if req.TTL > 0 {
@@ -161,6 +182,9 @@ func (s *Signer) Mint(_ context.Context, req MintRequest) (string, string, error
 	}
 	if req.Email != "" {
 		b.Claim(emailClaim, req.Email)
+	}
+	if req.Nonce != "" {
+		b.Claim(nonceClaim, req.Nonce)
 	}
 
 	tok, err := b.Build()

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -83,12 +84,25 @@ type TokenStore interface {
 	ConsumeRefresh(ctx context.Context, token string) (Refresh, error)
 }
 
+// ClientAuthenticator authenticates a confidential client's secret presented
+// at the token endpoint. *ClientRegistry satisfies it structurally; the
+// narrow interface (consumer-defines-the-interface, see state/doc.go) keeps
+// the /token handler decoupled from the registry's redirect-allowlist
+// concerns. It is consulted only on the confidential carve-out path — a
+// redeemed code that carried no PKCE challenge — so a client with no secret
+// can never authenticate this way.
+type ClientAuthenticator interface {
+	Authenticate(clientID, secret string) bool
+}
+
 // Token serves POST /token: it completes the authorization-code flow by
-// exchanging a redeemed code (PKCE-verified) for a signed JWT, and renews
-// sessions via the refresh-token grant.
+// exchanging a redeemed code for a signed JWT — PKCE-verified for public
+// clients, client-secret-authenticated for the confidential carve-out — and
+// renews sessions via the refresh-token grant.
 type Token struct {
 	store      TokenStore
 	signer     *keys.Signer
+	clients    ClientAuthenticator
 	now        func() time.Time
 	newRefresh func() (string, error)
 }
@@ -106,10 +120,11 @@ func WithRefreshGenerator(fn func() (string, error)) TokenOption {
 	return func(t *Token) { t.newRefresh = fn }
 }
 
-func NewToken(store TokenStore, signer *keys.Signer, opts ...TokenOption) *Token {
+func NewToken(store TokenStore, signer *keys.Signer, clients ClientAuthenticator, opts ...TokenOption) *Token {
 	t := &Token{
 		store:      store,
 		signer:     signer,
+		clients:    clients,
 		now:        func() time.Time { return time.Now().UTC() },
 		newRefresh: randomRefresh,
 	}
@@ -125,6 +140,13 @@ func NewToken(store TokenStore, signer *keys.Signer, opts ...TokenOption) *Token
 // two mutually exclusive parameter sets.
 type tokenInput struct {
 	RawBody []byte `contentType:"application/x-www-form-urlencoded"`
+
+	// Authorization carries HTTP Basic client credentials. RFC 6749 §2.3.1
+	// RECOMMENDS Basic for confidential clients, and golang.org/x/oauth2
+	// (the stack the Temporal Web UI uses) tries Basic first under
+	// AuthStyleAutoDetect, so the confidential carve-out must read it here as
+	// well as from the form body.
+	Authorization string `header:"Authorization"`
 }
 
 // tokenOutput is the RFC 6749 §5.1 token response. The no-store/no-cache
@@ -167,7 +189,7 @@ func (t *Token) handle(ctx context.Context, in *tokenInput) (*tokenOutput, error
 
 	switch form.Get("grant_type") {
 	case grantAuthorizationCode:
-		return t.authorizationCodeGrant(ctx, form)
+		return t.authorizationCodeGrant(ctx, form, in.Authorization)
 	case grantRefreshToken:
 		return t.refreshTokenGrant(ctx, form)
 	case "":
@@ -177,14 +199,29 @@ func (t *Token) handle(ctx context.Context, in *tokenInput) (*tokenOutput, error
 	}
 }
 
-func (t *Token) authorizationCodeGrant(ctx context.Context, form url.Values) (*tokenOutput, error) {
+func (t *Token) authorizationCodeGrant(ctx context.Context, form url.Values, authHeader string) (*tokenOutput, error) {
 	code := form.Get("code")
 	if code == "" {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code is required")
 	}
+
+	basicID, basicSecret, hasBasic := parseBasicAuth(authHeader)
 	verifier := form.Get("code_verifier")
-	if verifier == "" {
-		return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code_verifier is required (PKCE)")
+	clientID := form.Get("client_id")
+	presentedSecret := form.Get("client_secret")
+	if hasBasic {
+		clientID = basicID
+		presentedSecret = basicSecret
+	}
+
+	// A request that proves neither PKCE possession nor a client secret is
+	// malformed regardless of which client it claims to be — reject it
+	// before consuming the single-use code. (Which proof is actually
+	// required is decided post-consume from the code's own challenge, so the
+	// strict default cannot be downgraded by a confidential-looking
+	// request against a public client's code.)
+	if verifier == "" && presentedSecret == "" {
+		return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code_verifier (PKCE) or client authentication is required")
 	}
 
 	ac, err := t.store.ConsumeAuthCode(ctx, code)
@@ -198,17 +235,31 @@ func (t *Token) authorizationCodeGrant(ctx context.Context, form url.Values) (*t
 	if t.now().After(ac.ExpiresAt) {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "authorization code expired")
 	}
-	if form.Get("client_id") != ac.ClientID {
+	if clientID != ac.ClientID {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "client_id does not match the authorization request")
 	}
 	if form.Get("redirect_uri") != ac.RedirectURI {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "redirect_uri does not match the authorization request")
 	}
-	if !verifyPKCE(verifier, ac.CodeChallenge) {
-		return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+
+	// The code itself decides which proof is required. A code minted with a
+	// PKCE challenge always demands the verifier — that path is unchanged and
+	// strict, and a confidential client that chose PKCE still gets it
+	// enforced. Only a code minted with no challenge (the confidential
+	// carve-out, gated at /authorize on IsConfidential) falls through to
+	// client-secret authentication.
+	if ac.CodeChallenge != "" {
+		if verifier == "" {
+			return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code_verifier is required (PKCE)")
+		}
+		if !verifyPKCE(verifier, ac.CodeChallenge) {
+			return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+		}
+	} else if !t.clients.Authenticate(ac.ClientID, presentedSecret) {
+		return nil, oauthErr(http.StatusUnauthorized, "invalid_client", "client authentication failed")
 	}
 
-	return t.issue(ctx, ac.Email, ac.ClientID)
+	return t.issue(ctx, ac.Email, ac.ClientID, ac.Nonce)
 }
 
 func (t *Token) refreshTokenGrant(ctx context.Context, form url.Values) (*tokenOutput, error) {
@@ -229,18 +280,29 @@ func (t *Token) refreshTokenGrant(ctx context.Context, form url.Values) (*tokenO
 		return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "refresh token expired")
 	}
 
-	return t.issue(ctx, rt.Email, rt.ClientID)
+	// No nonce on refresh: OIDC Core binds nonce to the original
+	// authentication request, not to silently-renewed tokens, and the
+	// relying party does not re-check it on the refresh path.
+	return t.issue(ctx, rt.Email, rt.ClientID, "")
 }
 
 // issue mints the access/id token and a rotated refresh token, persisting the
 // latter before responding. It is the single place token shape and lifetimes
 // are decided, so the two grants cannot drift apart.
-func (t *Token) issue(ctx context.Context, email, clientID string) (*tokenOutput, error) {
+func (t *Token) issue(ctx context.Context, email, clientID, nonce string) (*tokenOutput, error) {
 	signed, jti, err := t.signer.Mint(ctx, keys.MintRequest{
 		Subject:     email,
 		Email:       email,
 		TTL:         accessTokenTTL,
 		Permissions: flatAdminPermissions(),
+		// OIDC Core: the ID token's aud must contain the requesting client.
+		// tempogate issues one token that is both access and id token, so it
+		// carries the client_id as aud; Temporal's frontend authorizer does
+		// not enforce aud, so this is additive for the gRPC path.
+		Audience: clientID,
+		// Echoed only when the client sent one at /authorize (empty on the
+		// refresh path); OIDC Core §2 requires the round-trip.
+		Nonce: nonce,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("oidc: mint access token: %w", err)
@@ -277,12 +339,16 @@ func (t *Token) issue(ctx context.Context, email, clientID string) (*tokenOutput
 }
 
 // flatAdminPermissions is the Hour-0 authorization model: every admitted
-// identity gets unconditional access across all namespaces. Group- or
-// role-derived grants will replace this once the shared permissions model
-// lands; until then the Temporal-formatted claim is constructed inline rather
-// than through that (not-yet-existing) package.
+// identity gets unconditional access. The value is dictated by Temporal's
+// default JWT ClaimMapper, which has no namespace wildcard: it grants
+// cluster-level and all-namespace access only via the System role, set by a
+// permission whose namespace part is exactly the system namespace
+// ("temporal-system"). A literal "*" would be treated as an ordinary
+// namespace named "*" and would NOT authorize cluster APIs (ListNamespaces,
+// cluster-info) or any real namespace. Group- or role-derived grants will
+// replace this once the shared permissions model lands.
 func flatAdminPermissions() []string {
-	return []string{"*:admin"}
+	return []string{"temporal-system:admin"}
 }
 
 // verifyPKCE checks the RFC 7636 S256 binding: BASE64URL(SHA256(verifier))
@@ -301,4 +367,34 @@ func randomRefresh() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// parseBasicAuth extracts client credentials from an "Authorization: Basic
+// <base64>" header. The scheme match is case-insensitive per RFC 7235. RFC
+// 6749 §2.3.1 form-url-encodes client_id/secret before the base64, and
+// golang.org/x/oauth2 (the Temporal Web UI's stack) does exactly that, so
+// each half is unescaped — falling back to the raw value if it is not valid
+// percent-encoding. ok is false for any other or missing scheme, so the
+// caller falls back to form-body credentials. The secret is not validated
+// here; ClientAuthenticator does that in constant time.
+func parseBasicAuth(header string) (id, secret string, ok bool) {
+	const prefix = "Basic "
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return "", "", false
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(header[len(prefix):]))
+	if err != nil {
+		return "", "", false
+	}
+	u, p, found := strings.Cut(string(raw), ":")
+	if !found {
+		return "", "", false
+	}
+	if dec, err := url.QueryUnescape(u); err == nil {
+		u = dec
+	}
+	if dec, err := url.QueryUnescape(p); err == nil {
+		p = dec
+	}
+	return u, p, true
 }

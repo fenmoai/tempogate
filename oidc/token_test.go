@@ -164,9 +164,15 @@ type TokenSuite struct {
 	store    *memTokenStore
 	keys     *keys.Keys
 	verifier *keys.Verifier
+	clients  oidc.ClientRegistry
 	srv      *httptest.Server
 	client   *http.Client
 }
+
+// confidentialSecret is the shared secret for the test's older-style
+// confidential client; the PKCE carve-out admits a no-challenge code only
+// when this is presented at /token.
+const confidentialSecret = "ui-confidential-secret"
 
 func TestTokenSuite(t *testing.T) {
 	suite.Run(t, new(TokenSuite))
@@ -188,8 +194,13 @@ func (s *TokenSuite) SetupTest() {
 		keys.WithTokenClock(func() time.Time { return signNow.Add(time.Minute) }),
 	)
 
+	reg, err := oidc.ParseClientRegistry("ui:" + testRedirectURI + ",webui:" + testRedirectURI)
+	s.Require().NoError(err)
+	s.Require().NoError(reg.WithSecrets("webui:" + confidentialSecret))
+	s.clients = reg
+
 	s.store = newMemTokenStore()
-	tok := oidc.NewToken(s.store, signer,
+	tok := oidc.NewToken(s.store, signer, s.clients,
 		oidc.WithTokenClock(func() time.Time { return signNow }),
 		oidc.WithRefreshGenerator(func() (string, error) { return fixedRefresh, nil }),
 	)
@@ -237,6 +248,148 @@ func authCodeForm() url.Values {
 	f.Set("client_id", "ui")
 	f.Set("code_verifier", pkceVerifier)
 	return f
+}
+
+// confAuthCode is a code minted for the confidential client (no PKCE
+// challenge, a nonce carried from /authorize) — the shape /callback produces
+// for an older-style client like the Temporal Web UI.
+func (s *TokenSuite) confAuthCode(code string) oidc.AuthCode {
+	return oidc.AuthCode{
+		Code:        code,
+		ClientID:    "webui",
+		RedirectURI: testRedirectURI,
+		Email:       "alice@example.com",
+		Scope:       "openid email",
+		Nonce:       "rp-nonce-xyz",
+		CreatedAt:   signNow,
+		ExpiresAt:   signNow.Add(time.Minute),
+	}
+}
+
+func confCodeForm() url.Values {
+	f := url.Values{}
+	f.Set("grant_type", "authorization_code")
+	f.Set("code", "conf-1")
+	f.Set("redirect_uri", testRedirectURI)
+	f.Set("client_id", "webui")
+	return f
+}
+
+// postBasic mirrors golang.org/x/oauth2 under AuthStyleInHeader: client
+// credentials are form-url-encoded then HTTP-Basic'd, never sent in the body.
+func (s *TokenSuite) postBasic(form url.Values, id, secret string) *http.Response {
+	req, err := http.NewRequest(http.MethodPost, s.srv.URL+"/token", strings.NewReader(form.Encode()))
+	s.Require().NoError(err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape(id), url.QueryEscape(secret))
+	resp, err := s.client.Do(req)
+	s.Require().NoError(err)
+	return resp
+}
+
+func (s *TokenSuite) TestConfidentialClientSecretViaFormBodyMintsJWT() {
+	s.store.putCode(s.confAuthCode("conf-1"))
+
+	f := confCodeForm()
+	f.Set("client_secret", confidentialSecret)
+	resp := s.post(f)
+	defer resp.Body.Close()
+
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+	body := s.decodeTokenResponse(resp)
+
+	tok, err := s.verifier.Verify(context.Background(), body.AccessToken)
+	s.Require().NoError(err)
+	aud, ok := tok.Audience()
+	s.Require().True(ok)
+	s.Equal([]string{"webui"}, aud, "OIDC ID token aud must be the requesting client_id")
+	nonce, err := jwxjwt.Get[string](tok, "nonce")
+	s.Require().NoError(err)
+	s.Equal("rp-nonce-xyz", nonce, "nonce from /authorize must round-trip into the token")
+	sub, _ := tok.Subject()
+	s.Equal("alice@example.com", sub)
+}
+
+func (s *TokenSuite) TestConfidentialClientSecretViaHTTPBasicMintsJWT() {
+	s.store.putCode(s.confAuthCode("conf-1"))
+
+	// No client_id/client_secret in the body: both come from the Basic header.
+	f := url.Values{}
+	f.Set("grant_type", "authorization_code")
+	f.Set("code", "conf-1")
+	f.Set("redirect_uri", testRedirectURI)
+
+	resp := s.postBasic(f, "webui", confidentialSecret)
+	defer resp.Body.Close()
+
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+	body := s.decodeTokenResponse(resp)
+	tok, err := s.verifier.Verify(context.Background(), body.AccessToken)
+	s.Require().NoError(err)
+	aud, _ := tok.Audience()
+	s.Equal([]string{"webui"}, aud)
+}
+
+func (s *TokenSuite) TestConfidentialWrongSecretIsInvalidClient() {
+	s.store.putCode(s.confAuthCode("conf-1"))
+
+	f := confCodeForm()
+	f.Set("client_secret", "not-the-secret")
+	resp := s.post(f)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusUnauthorized, resp.StatusCode)
+	s.Equal("invalid_client", s.decodeOAuthError(resp))
+}
+
+func (s *TokenSuite) TestConfidentialMissingAnyProofIsInvalidRequest() {
+	s.store.putCode(s.confAuthCode("conf-1"))
+
+	resp := s.post(confCodeForm()) // no code_verifier, no client_secret
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusBadRequest, resp.StatusCode)
+	s.Equal("invalid_request", s.decodeOAuthError(resp))
+}
+
+// TestPublicClientCannotRideTheCarveOut proves the relaxation is strictly
+// secret-gated: a code with no PKCE challenge bound to a *public* client
+// (no registered secret) cannot be redeemed even when a secret is presented —
+// Authenticate fails closed, so this never degrades to "no PKCE, no auth".
+func (s *TokenSuite) TestPublicClientCannotRideTheCarveOut() {
+	ac := s.authCode("pub-nopkce")
+	ac.CodeChallenge = "" // a public client could never have produced this at /authorize; defense in depth at /token
+	s.store.putCode(ac)
+
+	f := url.Values{}
+	f.Set("grant_type", "authorization_code")
+	f.Set("code", "pub-nopkce")
+	f.Set("redirect_uri", testRedirectURI)
+	f.Set("client_id", "ui")
+	f.Set("client_secret", "anything")
+	resp := s.post(f)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusUnauthorized, resp.StatusCode)
+	s.Equal("invalid_client", s.decodeOAuthError(resp))
+}
+
+func (s *TokenSuite) TestPKCEPathStampsAudAndNonce() {
+	ac := s.authCode("code-1")
+	ac.Nonce = "rp-nonce-pkce"
+	s.store.putCode(ac)
+
+	resp := s.post(authCodeForm())
+	defer resp.Body.Close()
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+
+	tok, err := s.verifier.Verify(context.Background(), s.decodeTokenResponse(resp).AccessToken)
+	s.Require().NoError(err)
+	aud, _ := tok.Audience()
+	s.Equal([]string{"ui"}, aud)
+	nonce, err := jwxjwt.Get[string](tok, "nonce")
+	s.Require().NoError(err)
+	s.Equal("rp-nonce-pkce", nonce)
 }
 
 func (s *TokenSuite) decodeTokenResponse(resp *http.Response) struct {
@@ -297,7 +450,7 @@ func (s *TokenSuite) TestAuthorizationCodeGrantMintsVerifiableJWT() {
 
 	perms, ok := tok.Field("permissions")
 	s.Require().True(ok)
-	s.Equal([]string{"*:admin"}, toStringSlice(s.T(), perms))
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), perms))
 
 	exp, ok := tok.Expiration()
 	s.Require().True(ok)
@@ -449,7 +602,7 @@ func (s *TokenSuite) TestRefreshTokenGrantRotatesAndMintsSamePermissions() {
 	s.Require().NoError(err)
 	perms, ok := tok.Field("permissions")
 	s.Require().True(ok)
-	s.Equal([]string{"*:admin"}, toStringSlice(s.T(), perms))
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), perms))
 	sub, _ := tok.Subject()
 	s.Equal("alice@example.com", sub)
 
@@ -524,7 +677,7 @@ func (s *TokenSuite) TestConsumeCodeErrorOtherThanNotFoundIsServerError() {
 func (s *TokenSuite) TestSignerWithoutKeysIsServerError() {
 	store := newMemTokenStore()
 	store.putCode(s.authCode("code-1"))
-	tok := oidc.NewToken(store, keys.NewSigner(), // no keypair ⇒ Mint fails
+	tok := oidc.NewToken(store, keys.NewSigner(), s.clients, // no keypair ⇒ Mint fails
 		oidc.WithTokenClock(func() time.Time { return signNow }),
 	)
 	mux := http.NewServeMux()
@@ -544,7 +697,7 @@ func (s *TokenSuite) TestDefaultRefreshGeneratorIsOpaque() {
 	store := newMemTokenStore()
 	store.putCode(s.authCode("code-1"))
 	signer := keys.NewSigner(keys.WithKeys(s.keys), keys.WithIssuer(testIssuer))
-	tok := oidc.NewToken(store, signer,
+	tok := oidc.NewToken(store, signer, s.clients,
 		oidc.WithTokenClock(func() time.Time { return signNow }),
 	) // no WithRefreshGenerator: exercises crypto/rand path
 	mux := http.NewServeMux()

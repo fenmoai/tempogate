@@ -7,27 +7,45 @@ import (
 	"github.com/fenmoai/tempogate/keys"
 )
 
-type authorizeParams struct {
+type clientRegistryParams struct {
 	fx.In
 
-	Store AuthRequestStore
-
-	Issuer         string `name:"oidc_issuer"`
-	Clients        string `name:"oidc_clients"`
-	GoogleClientID string `name:"google_client_id"`
-	GoogleAuth     string `name:"google_auth_endpoint"`
+	Clients string `name:"oidc_clients"`
+	Secrets string `name:"oidc_client_secrets"`
 }
 
-// newAuthorizeRegistrar builds the /authorize endpoint. A malformed
-// OIDC__CLIENTS fails graph construction here rather than surfacing as a
-// per-request error later.
-func newAuthorizeRegistrar(p authorizeParams) (func(huma.API), error) {
+// newClientRegistry parses the single shared ClientRegistry both /authorize
+// and /token depend on. A malformed OIDC__CLIENTS or OIDC__CLIENT_SECRETS —
+// or a secret declared for an unregistered client — fails graph construction
+// here rather than surfacing as a per-request error later, so the PKCE
+// carve-out can never be half-configured at runtime.
+func newClientRegistry(p clientRegistryParams) (ClientRegistry, error) {
 	reg, err := ParseClientRegistry(p.Clients)
 	if err != nil {
 		return nil, err
 	}
-	a := New(p.Store, reg, p.Issuer, p.GoogleClientID, p.GoogleAuth)
-	return a.Register, nil
+	if err := reg.WithSecrets(p.Secrets); err != nil {
+		return nil, err
+	}
+	return reg, nil
+}
+
+type authorizeParams struct {
+	fx.In
+
+	Store   AuthRequestStore
+	Clients ClientRegistry
+
+	Issuer         string `name:"oidc_issuer"`
+	GoogleClientID string `name:"google_client_id"`
+	GoogleAuth     string `name:"google_auth_endpoint"`
+}
+
+// newAuthorizeRegistrar builds the /authorize endpoint over the shared
+// registry, so its PKCE/confidential decisions cannot drift from /token's.
+func newAuthorizeRegistrar(p authorizeParams) func(huma.API) {
+	a := New(p.Store, p.Clients, p.Issuer, p.GoogleClientID, p.GoogleAuth)
+	return a.Register
 }
 
 type callbackParams struct {
@@ -50,15 +68,18 @@ func newCallbackRegistrar(p callbackParams) func(huma.API) {
 type tokenParams struct {
 	fx.In
 
-	Store  TokenStore
-	Signer *keys.Signer
+	Store   TokenStore
+	Signer  *keys.Signer
+	Clients ClientRegistry
 }
 
 // newTokenRegistrar builds the /token endpoint. The Signer is provided by
 // keys.Fx over the shared keypair aggregate; TokenStore is satisfied by
-// state/sqlite via fx.As.
+// state/sqlite via fx.As; ClientRegistry is the same instance /authorize
+// uses, so a code minted without PKCE is redeemable only by the confidential
+// client that secret-authenticates here.
 func newTokenRegistrar(p tokenParams) func(huma.API) {
-	t := NewToken(p.Store, p.Signer)
+	t := NewToken(p.Store, p.Signer, p.Clients)
 	return t.Register
 }
 
@@ -82,6 +103,7 @@ func newUserInfoRegistrar(p userInfoParams) func(huma.API) {
 // state/sqlite, oidc/google and keys via fx.As / fx.Provide.
 func Fx() fx.Option {
 	return fx.Options(
+		fx.Provide(newClientRegistry),
 		fx.Provide(
 			fx.Annotate(
 				newAuthorizeRegistrar,
