@@ -4,6 +4,7 @@ import (
 	"context"
 
 	xloadtype "github.com/gojekfarm/xtools/xload/type"
+	"github.com/spf13/cobra"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 
@@ -39,14 +40,22 @@ type RunParams struct {
 // ctx is cancelled on OnStop so long-running subcommands (serve) that block
 // on ctx can unwind gracefully. One-shot subcommands (version, migrate)
 // finish immediately and trigger Shutdowner themselves.
-func Run(p RunParams) {
-	ctx, cancel := context.WithCancel(context.Background())
-	rootCmd := NewRootCmd(
+// rootCommand assembles the cobra command tree from the fx graph. It is split
+// out of Run so the wiring — which subcommands exist — is unit-testable
+// without standing up the fx lifecycle.
+func rootCommand(p RunParams) *cobra.Command {
+	return NewRootCmd(
 		WithSubcommand(newServeCmd(p)),
 		WithSubcommand(newMigrateCmd(p)),
 		WithSubcommand(newKeysCmd(p)),
 		WithSubcommand(newLoginCmd(p)),
+		WithSubcommand(newTokenCmd(p)),
 	)
+}
+
+func Run(p RunParams) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rootCmd := rootCommand(p)
 	done := make(chan struct{})
 
 	runCmd := func(ctx context.Context) {

@@ -96,12 +96,48 @@ Flags:
 
 | Flag          | Default                      | Notes                                                            |
 | ------------- | ---------------------------- | ---------------------------------------------------------------- |
-| `--issuer`    | `$TEMPOGATE__ISSUER`         | tempogate base URL. Required (flag or env).                      |
-| `--port`      | `0`                          | Loopback port. `0` = a free ephemeral port (recommended).        |
-| `--client-id` | `tempogate-cli`              | Must match a registered `OIDC__CLIENTS` entry.                   |
+| `--issuer`     | `$TEMPOGATE__ISSUER`        | tempogate base URL. Required (flag or env).                      |
+| `--port`       | `0`                         | Loopback port. `0` = a free ephemeral port (recommended).        |
+| `--client-id`  | `tempogate-cli`             | Must match a registered `OIDC__CLIENTS` entry.                   |
+| `--token-file` | `~/.tempogate/token.json`   | Where the token is persisted.                                    |
 
 `stdout` carries only the token; all human-facing text (the authorize URL,
 progress, expiry) goes to `stderr`, so `$(tempogate login)` is safe in scripts.
+
+## Persistence and `tempogate token`
+
+`tempogate login` does not just print the token — it also writes the access
+token, the refresh token, and the absolute expiry to
+`~/.tempogate/token.json` (file mode `0600`, parent directory `0700`; the
+write is atomic via a same-directory temp file + rename, so a crash never
+leaves a half-written credential).
+
+After that first login, use `tempogate token` for everything:
+
+```bash
+export TEMPOGATE__ISSUER=https://tempogate.example.com
+export TEMPORAL_AUTH_TOKEN=$(tempogate token)
+```
+
+`tempogate token` reads the persisted file and:
+
+* if the access token is **more than 5 minutes** from expiry, prints it
+  immediately — a pure file read, no network, well under a second;
+* if it is **within 5 minutes** of expiry, transparently exchanges the
+  refresh token at `<issuer>/token` (`grant_type=refresh_token`), rewrites
+  `token.json` with the rotated pair, and prints the fresh access token.
+
+Failure modes are explicit, never silent:
+
+* no token file yet → a clear "run `tempogate login` first" error;
+* a revoked / already-rotated / expired refresh token → the renewal fails
+  cleanly **without** overwriting the stored file or emitting the stale
+  token, so nothing downstream acts on a credential the server has disowned.
+
+Refresh tokens are rotated on every exchange (the server invalidates the old
+one), so a captured `token.json` is usable at most until the next refresh.
+
+## Security properties
 
 ## Security properties
 
@@ -116,6 +152,9 @@ progress, expiry) goes to `stderr`, so `$(tempogate login)` is safe in scripts.
   callback is never reachable off-host.
 * **Bounded wait.** If no code arrives within three minutes the command
   exits with a clear error rather than hanging the shell.
-* **Short-lived.** The minted access token follows the issuer's lifetime
-  (4 hours in v1); disk persistence and silent refresh are layered on top of
-  this flow separately.
+* **Short-lived, auto-renewed.** The minted access token follows the
+  issuer's lifetime (4 hours in v1); `tempogate token` renews it from the
+  rotating refresh token five minutes before expiry, so a leaked access
+  token has a bounded blast radius without forcing a re-login.
+* **At rest.** The persisted credential is `0600` under a `0700` directory
+  and written atomically; a rejected refresh never clobbers it.
