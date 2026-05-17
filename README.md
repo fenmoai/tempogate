@@ -122,13 +122,16 @@ make check         # fmt + vet + gci; fails on dirty tree
 make lint          # golangci-lint
 make test          # check + race + coverage
 make ci            # what GitHub Actions runs
-make test-e2e      # container-backed Web UI SSO acceptance proof (needs Docker)
+make test-e2e      # container-backed acceptance proofs (needs Docker)
 ```
 
 `make test-e2e` stands up `temporalio/ui`, a JWKS-backed `temporal-frontend`,
-a mock Google IdP and headless Chrome via testcontainers, then drives a real
-browser login end to end and asserts the minted JWT authenticates a gRPC
-`ListNamespaces`. It is behind a `//go:build e2e` tag and a dedicated CI job,
+a mock Google IdP and headless Chrome via testcontainers and proves two flows
+end to end: the **Web UI SSO** login, and the **`tempogate login` CLI loopback**
+flow (the real binary, browser-driven consent, token persisted to
+`~/.tempogate/token.json`, then `tempogate token` refresh). Both assert the
+minted JWT authenticates a gRPC `ListNamespaces` and that an unauthenticated
+call is rejected. It is behind a `//go:build e2e` tag and a dedicated CI job,
 so the default `make ci` stays fast.
 
 Go 1.26+ required. A dependency (`lestrrat-go/jwx/v4`) uses `encoding/json/v2`,

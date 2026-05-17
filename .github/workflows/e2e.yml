@@ -1,8 +1,9 @@
 name: e2e
 
-# The container-backed Web UI SSO acceptance proof. Kept in its own workflow
-# (not folded into `ci`) so the fast unit job stays fast and an e2e failure is
-# isolated and independently visible. Builds the tempogate + mock-Google
+# The container-backed acceptance proofs: the Web UI SSO flow and the
+# `tempogate login` CLI loopback flow. Kept in its own workflow (not folded
+# into `ci`) so the fast unit job stays fast and an e2e failure is isolated
+# and independently visible. Builds the tempogate + mock-Google + cliclient
 # images and runs temporalio/ui, temporal-frontend, postgres and headless
 # Chrome via testcontainers.
 #
@@ -27,9 +28,9 @@ concurrency:
 
 jobs:
   e2e:
-    name: web-ui sso e2e
+    name: sso + cli loopback e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     # main: always. PRs: only when explicitly opted in with the e2e:true label.
     if: >-
       github.event_name == 'push' ||
@@ -37,12 +38,55 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Caches $GOMODCACHE + the build cache keyed on go.sum, so the e2e-tagged
+      # deps (chromedp, testcontainers, temporal api…) are fetched/compiled
+      # once and restored on every later run with an unchanged go.sum.
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      # ubuntu-latest ships a working Docker daemon, which testcontainers
-      # drives directly; no extra service container is needed.
-      - name: Run Web UI SSO e2e
-        run: make test-e2e
+      - uses: docker/setup-buildx-action@v4
+
+      # Each runner is a fresh VM, so a plain `docker build` would re-pull the
+      # base images and re-run `go mod download` + `go build` inside Docker
+      # every run. Build the three e2e images with build-push-action and a
+      # cross-run GitHub Actions layer cache instead (type=gha; these images
+      # are loaded locally for testcontainers, never pushed). Distinct scopes
+      # keep the three images' caches from evicting each other. The expensive
+      # module-download / compile layers are restored when go.* + sources are
+      # unchanged.
+      - name: Build tempogate e2e image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: tempogate:e2e
+          load: true
+          cache-from: type=gha,scope=e2e-tempogate
+          cache-to: type=gha,mode=max,scope=e2e-tempogate
+
+      - name: Build mock-Google e2e image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./test/e2e/mockgoogle/Dockerfile
+          tags: tempogate-mockgoogle:e2e
+          load: true
+          cache-from: type=gha,scope=e2e-mockgoogle
+          cache-to: type=gha,mode=max,scope=e2e-mockgoogle
+
+      - name: Build CLI-client e2e image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./test/e2e/cliclient/Dockerfile
+          tags: tempogate-cliclient:e2e
+          load: true
+          cache-from: type=gha,scope=e2e-cliclient
+          cache-to: type=gha,mode=max,scope=e2e-cliclient
+
+      # Images are pre-built (and cached) above; this only runs the tests,
+      # picking them up via the E2E_*_IMAGE defaults the Makefile passes.
+      - name: Run SSO + CLI loopback e2e
+        run: make test-e2e-go

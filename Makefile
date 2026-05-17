@@ -26,7 +26,7 @@ LDFLAGS := -s -w \
 	-X '$(BUILDINFO).gitCommit=$(GIT_COMMIT)' \
 	-X '$(BUILDINFO).buildDate=$(BUILD_DATE)'
 
-.PHONY: start build fmt vet lint imports imports-check check tidy test test-run test-e2e ci gen-oas clean help tools \
+.PHONY: start build fmt vet lint imports imports-check check tidy test test-run test-e2e test-e2e-images test-e2e-go ci gen-oas clean help tools \
         gci golangci-lint
 
 start: ## Run the binary directly with build-info ldflags injected
@@ -74,8 +74,9 @@ test-run: ## run tests with race + coverage (no check chain — CI-friendly)
 
 test: check test-run ## check + test-run
 
-# Container-backed acceptance proof (temporalio/ui + temporal-frontend + mock
-# Google + headless Chrome). Behind the `e2e` build tag and a dedicated CI job
+# Container-backed acceptance proofs: the Web UI SSO flow and the
+# `tempogate login` CLI loopback flow (temporalio/ui + temporal-frontend +
+# mock Google + headless Chrome). Behind the `e2e` build tag and a dedicated CI job
 # so `ci` stays fast; needs a working Docker daemon.
 #
 # The tempogate and mock-Google Dockerfiles use BuildKit-only syntax, but
@@ -84,12 +85,23 @@ test: check test-run ## check + test-run
 # via env; the test uses them as-is instead of building them itself.
 E2E_TEMPOGATE_IMAGE  ?= tempogate:e2e
 E2E_MOCKGOOGLE_IMAGE ?= tempogate-mockgoogle:e2e
+E2E_CLICLIENT_IMAGE  ?= tempogate-cliclient:e2e
 
-test-e2e: ## run the multi-container Web UI SSO end-to-end test
+# Split so CI can build the images with a cross-run layer cache
+# (docker/build-push-action + type=gha; see .github/workflows/e2e.yml) and
+# then call test-e2e-go directly. Locally `make test-e2e` builds + runs as
+# before — the local Docker daemon already caches layers across runs.
+test-e2e-images: ## build the three e2e images with a BuildKit-capable docker build
 	DOCKER_BUILDKIT=1 docker build -t $(E2E_TEMPOGATE_IMAGE) -f Dockerfile .
 	DOCKER_BUILDKIT=1 docker build -t $(E2E_MOCKGOOGLE_IMAGE) -f test/e2e/mockgoogle/Dockerfile .
+	DOCKER_BUILDKIT=1 docker build -t $(E2E_CLICLIENT_IMAGE) -f test/e2e/cliclient/Dockerfile .
+
+test-e2e-go: ## run the e2e tests against pre-built E2E_* images
 	E2E_TEMPOGATE_IMAGE=$(E2E_TEMPOGATE_IMAGE) E2E_MOCKGOOGLE_IMAGE=$(E2E_MOCKGOOGLE_IMAGE) \
-		go test -tags e2e -timeout 25m -count=1 ./test/e2e/...
+	E2E_CLICLIENT_IMAGE=$(E2E_CLICLIENT_IMAGE) \
+		go test -tags e2e -timeout 40m -count=1 ./test/e2e/...
+
+test-e2e: test-e2e-images test-e2e-go ## build images + run the Web UI SSO + CLI loopback e2e tests
 
 ci: check lint test-run ## fmt/vet/imports + lint + tests (used by GitHub Actions)
 	@go tool cover -func=coverage.out | tail -1
