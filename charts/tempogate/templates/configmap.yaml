@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tempogate.configMapName" . }}
+  labels:
+    {{- include "tempogate.labels" . | nindent 4 }}
+data:
+  LOG__LEVEL: {{ .Values.log.level | quote }}
+  HTTP__LISTENER: {{ printf "%s:%v" .Values.listenAddress .Values.service.port | quote }}
+  STATE__SQLITE__PATH: {{ .Values.state.sqlitePath | quote }}
+  {{- with .Values.oidc.issuer }}
+  OIDC__ISSUER: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.auth.clients }}
+  OIDC__CLIENTS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.auth.allowedDomains }}
+  OIDC__ALLOWED_DOMAINS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.auth.upstream.google.authEndpoint }}
+  OIDC__GOOGLE__AUTH_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.auth.upstream.google.tokenEndpoint }}
+  OIDC__GOOGLE__TOKEN_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.auth.upstream.google.issuerUrl }}
+  OIDC__GOOGLE__ISSUER_URL: {{ . | quote }}
+  {{- end }}

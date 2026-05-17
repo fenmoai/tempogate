@@ -1,0 +1,10 @@
+tempogate {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Port-forward and check liveness:
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "tempogate.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl http://127.0.0.1:{{ .Values.service.port }}/healthz
+
+{{ if not .Values.oidc.issuer -}}
+NOTE: oidc.issuer is unset — set it to this server's externally reachable URL before wiring Temporal.
+{{ end -}}
+Next steps (wire Temporal Web UI SSO + a tctl token) are in docs/getting-started.md.

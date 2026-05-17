@@ -1,0 +1,28 @@
+apiVersion: v2
+name: tempogate
+description: Drop-in OIDC provider and OAuth2 authorization server for self-hosted Temporal
+type: application
+
+# SemVer chart version. Bump on every change to the chart or its templates.
+version: 0.1.0
+
+# The tempogate image tag this chart defaults to. `image.tag` overrides it;
+# when unset the Deployment pulls ghcr.io/fenmoai/tempogate:<appVersion>.
+appVersion: "0.1.0"
+
+# tempogate is a pure-Go binary; nothing here needs a bleeding-edge API.
+kubeVersion: ">=1.25.0-0"
+
+home: https://github.com/fenmoai/tempogate
+sources:
+  - https://github.com/fenmoai/tempogate
+keywords:
+  - temporal
+  - oidc
+  - oauth2
+  - jwt
+  - sso
+  - authz
+maintainers:
+  - name: tempogate maintainers
+    url: https://github.com/fenmoai/tempogate
