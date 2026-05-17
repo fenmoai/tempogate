@@ -124,11 +124,16 @@ func (s *server) auth(w http.ResponseWriter, r *http.Request) {
 	email := s.current.Email
 	s.mu.Unlock()
 
+	// Pass the raw (already query-decoded) values: html/template URL-escapes
+	// them exactly once in the href query context. Pre-escaping here would
+	// double-encode, so /auth/approve would receive a still-encoded
+	// redirect_uri, fail to parse it as absolute, and the browser would 404
+	// on a relative redirect.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = consentTmpl.Execute(w, struct{ Email, RedirectURI, State string }{
 		Email:       email,
-		RedirectURI: url.QueryEscape(q.Get("redirect_uri")),
-		State:       url.QueryEscape(q.Get("state")),
+		RedirectURI: q.Get("redirect_uri"),
+		State:       q.Get("state"),
 	})
 }
 

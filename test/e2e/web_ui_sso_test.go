@@ -15,14 +15,15 @@ package e2e
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,7 +116,7 @@ func TestWebUISSO(t *testing.T) {
 		require.True(t, tok.Has("nonce"), "nonce must round-trip so the UI accepts the token")
 		perms, ok := tok.Field("permissions")
 		require.True(t, ok)
-		require.Equal(t, []any{"*:admin"}, perms, "flat Hour-0 authz: full admin")
+		require.Equal(t, []any{"temporal-system:admin"}, perms, "flat Hour-0 authz: System Admin (Temporal's default ClaimMapper has no namespace wildcard)")
 		sub, _ := tok.Subject()
 		require.Equal(t, allowedEmail, sub)
 
@@ -174,7 +175,7 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 		Started: true,
 	})
 	require.NoError(t, err, "mockgoogle")
-	t.Cleanup(func() { _ = mock.Terminate(ctx) })
+	track(ctx, t, "mockgoogle", mock)
 	mockBase := mappedHTTP(ctx, t, mock, "8080")
 
 	// --- tempogate: migrate (one-shot) then serve, sharing a volume ---
@@ -207,7 +208,7 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 		Started: true,
 	})
 	require.NoError(t, err, "tempogate migrate")
-	t.Cleanup(func() { _ = migrate.Terminate(ctx) })
+	track(ctx, t, "tempogate-migrate", migrate)
 
 	tempogate, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
@@ -226,7 +227,7 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 		Started: true,
 	})
 	require.NoError(t, err, "tempogate serve")
-	t.Cleanup(func() { _ = tempogate.Terminate(ctx) })
+	track(ctx, t, "tempogate", tempogate)
 
 	// --- postgres for Temporal ---
 	pg, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -243,7 +244,7 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 		Started: true,
 	})
 	require.NoError(t, err, "postgres")
-	t.Cleanup(func() { _ = pg.Terminate(ctx) })
+	track(ctx, t, "postgres", pg)
 
 	// --- temporal-frontend (auto-setup) with JWKS-backed default authorizer ---
 	temporal, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -254,6 +255,23 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 				"POSTGRES_USER": "temporal", "POSTGRES_PWD": "temporal",
 				"POSTGRES_SEEDS": "db", "DBNAME": "temporal",
 				"BIND_ON_IP": "0.0.0.0", // frontend must be reachable off-loopback
+				// With the JWT authorizer on, Temporal's own internal worker
+				// would call the (authorizing) frontend with no token and
+				// fatally fail its system scanners; the internal frontend
+				// gives internal traffic an unauthorized bypass while the
+				// external 7233 still enforces the JWT. And auto-setup's
+				// default-namespace registration is itself an authorized call
+				// that its `set -e` script cannot survive — skip it; the
+				// schema-bootstrapped temporal-system namespace is enough for
+				// ListNamespaces to be non-empty.
+				"USE_INTERNAL_FRONTEND":           "true",
+				"SKIP_DEFAULT_NAMESPACE_CREATION": "true",
+				// USE_INTERNAL_FRONTEND only renders the config block and drops
+				// publicClient; auto-setup still starts the *default* service
+				// set (no internal-frontend), so the service must be requested
+				// explicitly or the worker has nowhere to connect and the
+				// container crashes after "Temporal server started".
+				"SERVICES": "frontend:internal-frontend:history:matching:worker",
 				// Stock config_template.yaml templates the authorization block
 				// from exactly these env vars.
 				"TEMPORAL_JWT_KEY_SOURCE1":   tempogateIssuer + "/.well-known/jwks.json",
@@ -270,7 +288,7 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 		Started: true,
 	})
 	require.NoError(t, err, "temporal")
-	t.Cleanup(func() { _ = temporal.Terminate(ctx) })
+	track(ctx, t, "temporal", temporal)
 
 	// --- temporal-ui, configured only via TEMPORAL_AUTH_* ---
 	ui, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -297,7 +315,7 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 		Started: true,
 	})
 	require.NoError(t, err, "temporal-ui")
-	t.Cleanup(func() { _ = ui.Terminate(ctx) })
+	track(ctx, t, "temporal-ui", ui)
 
 	// --- headless Chrome on the network so it resolves the aliases ---
 	chrome, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -316,7 +334,7 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 		Started: true,
 	})
 	require.NoError(t, err, "chrome")
-	t.Cleanup(func() { _ = chrome.Terminate(ctx) })
+	track(ctx, t, "chrome", chrome)
 
 	return &stack{
 		mockBaseURL:  mockBase,
@@ -329,25 +347,38 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 // ---------- browser flow ----------
 
 // driveLoginAndExtractJWT runs the full SSO chain in headless Chrome and
-// returns the tempogate JWT the Temporal UI stored in its session cookie.
+// returns the tempogate JWT the Temporal UI's SPA carries on its
+// authenticated API calls — the same token the session was minted from.
 func (s *stack) driveLoginAndExtractJWT(ctx context.Context, t *testing.T) string {
 	t.Helper()
 	browserCtx, cancel := s.browser(ctx, t)
 	defer cancel()
 
-	var rawCookie string
+	// The UI hands the token to its SPA via a short-lived (60s), SPA-consumed
+	// user* cookie — racy to read, and cross-origin target swaps make a
+	// Set-Cookie capture flaky. After login the SPA instead attaches the
+	// token as `Authorization: Bearer <jwt>` to every /api/v1 call (ui-server
+	// requires that header), all same-origin on the settled page. Capturing
+	// that outgoing request header is deterministic and lifetime-independent.
+	bc := &bearerCatcher{done: make(chan string, 1)}
+	chromedp.ListenTarget(browserCtx, bc.onEvent)
+
 	err := chromedp.Run(browserCtx,
 		network.Enable(),
 		network.ClearBrowserCookies(),
 		chromedp.Navigate(s.uiInternal+"/auth/sso?returnUrl=/namespaces"),
 		chromedp.WaitVisible(`#approve`, chromedp.ByID), // mock Google consent screen
 		chromedp.Click(`#approve`, chromedp.ByID),
-		waitForCookie("user0", 90*time.Second, &rawCookie),
 	)
-	require.NoError(t, err, "SSO browser flow")
-	require.NotEmpty(t, rawCookie, "Temporal UI must set the user session cookie")
+	require.NoError(t, err, "SSO browser flow (consent)")
 
-	return decodeUITokenCookie(t, rawCookie)
+	select {
+	case jwtStr := <-bc.done:
+		return jwtStr
+	case <-time.After(90 * time.Second):
+		t.Fatal("e2e: SPA never sent an authenticated /api/v1 request after SSO")
+		return ""
+	}
 }
 
 // driveLoginExpectingForbidden runs the chain for a disallowed identity and
@@ -379,61 +410,34 @@ func (s *stack) browser(ctx context.Context, t *testing.T) (context.Context, con
 	return browserCtx, func() { cancelBrowser(); cancelAlloc() }
 }
 
-// waitForCookie polls the cookie jar until the named cookie appears (login
-// done) or the deadline passes. Joins multi-chunk session cookies (user0..N)
-// in order, mirroring how the Temporal UI writes large tokens.
-func waitForCookie(name string, timeout time.Duration, out *string) chromedp.Action {
-	return chromedp.ActionFunc(func(ctx context.Context) error {
-		deadline := time.Now().Add(timeout)
-		for {
-			cookies, err := network.GetCookies().Do(ctx)
-			if err == nil {
-				chunks := map[string]string{}
-				for _, c := range cookies {
-					if strings.HasPrefix(c.Name, "user") {
-						chunks[c.Name] = c.Value
-					}
-				}
-				if _, ok := chunks[name]; ok {
-					var b strings.Builder
-					for i := 0; ; i++ {
-						v, ok := chunks[fmt.Sprintf("user%d", i)]
-						if !ok {
-							break
-						}
-						b.WriteString(v)
-					}
-					*out = b.String()
-					return nil
-				}
-			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("e2e: cookie %q not set within %s", name, timeout)
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-	})
+// bearerCatcher captures the tempogate JWT the Temporal UI's SPA attaches as
+// `Authorization: Bearer <jwt>` to its /api/v1 calls after login. ui-server's
+// ValidateAuthHeaderExists mandates that header, so a 200 from /api/v1 means
+// the SPA holds the token; intercepting the outgoing request header is
+// deterministic and immune to the handoff cookie's 60s lifetime / SPA
+// consumption. These XHRs are same-origin on the settled post-login page, so
+// the listener is not affected by the earlier cross-origin target swaps.
+type bearerCatcher struct {
+	done chan string
+	once sync.Once
 }
 
-// decodeUITokenCookie reverses temporalio/ui-server's SetUser encoding:
-// base64(JSON{AccessToken, IDToken, ...}). tempogate issues one token that is
-// both, so either field is the JWT; IDToken is what go-oidc verified.
-func decodeUITokenCookie(t *testing.T, raw string) string {
-	t.Helper()
-	if dec, err := url.QueryUnescape(raw); err == nil {
-		raw = dec
+func (bc *bearerCatcher) onEvent(ev interface{}) {
+	e, ok := ev.(*network.EventRequestWillBeSent)
+	if !ok || e.Request == nil || !strings.Contains(e.Request.URL, "/api/v1/") {
+		return
 	}
-	b, err := base64.StdEncoding.DecodeString(raw)
-	require.NoError(t, err, "user cookie must be base64")
-	var u struct {
-		AccessToken string `json:"AccessToken"`
-		IDToken     string `json:"IDToken"`
+	const prefix = "Bearer "
+	for k, v := range e.Request.Headers {
+		if !strings.EqualFold(k, "authorization") {
+			continue
+		}
+		s, _ := v.(string)
+		if len(s) > len(prefix) && strings.EqualFold(s[:len(prefix)], prefix) {
+			tok := strings.TrimSpace(s[len(prefix):])
+			bc.once.Do(func() { bc.done <- tok })
+		}
 	}
-	require.NoError(t, json.Unmarshal(b, &u), "user cookie must be JSON")
-	if u.IDToken != "" {
-		return u.IDToken
-	}
-	return u.AccessToken
 }
 
 // ---------- helpers ----------
@@ -494,6 +498,29 @@ func devtoolsWS(ctx context.Context, t *testing.T, c testcontainers.Container) s
 	require.NoError(t, err)
 	u.Host = mapped.Host
 	return u.String()
+}
+
+// track registers cleanups so that, when the test fails, every container's
+// logs are dumped before it is torn down. t.Cleanup is LIFO, so the
+// log-dump (registered last) runs before Terminate (registered first) and
+// the logs are still available. This is what makes a CI failure
+// self-diagnosing instead of an opaque "container exited with code 1".
+func track(ctx context.Context, t *testing.T, name string, c testcontainers.Container) {
+	t.Helper()
+	t.Cleanup(func() { _ = c.Terminate(ctx) })
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		rc, err := c.Logs(ctx)
+		if err != nil {
+			t.Logf("e2e: %s: logs unavailable: %v", name, err)
+			return
+		}
+		defer func() { _ = rc.Close() }()
+		b, _ := io.ReadAll(rc)
+		t.Logf("=== %s container logs ===\n%s\n=== end %s logs ===", name, b, name)
+	})
 }
 
 func repoRoot(t *testing.T) string {
