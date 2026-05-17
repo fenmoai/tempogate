@@ -88,10 +88,11 @@ func happyAuthorize(w http.ResponseWriter, r *http.Request, _ *mockIssuer) {
 func happyToken(w http.ResponseWriter, _ *http.Request, _ *mockIssuer) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"access_token": "the.jwt.token",
-		"token_type":   "Bearer",
-		"expires_in":   14400,
-		"id_token":     "the.jwt.token",
+		"access_token":  "the.jwt.token",
+		"refresh_token": "refresh-abc",
+		"token_type":    "Bearer",
+		"expires_in":    14400,
+		"id_token":      "the.jwt.token",
 	})
 }
 
@@ -140,18 +141,19 @@ func (s *LoopbackSuite) newFlow(opts ...cli.Option) *cli.Flow {
 }
 
 func (s *LoopbackSuite) TestHappyPathReturnsTokenAndExpiry() {
-	token, expiresAt, err := s.newFlow().Run(context.Background())
+	tok, err := s.newFlow().Run(context.Background())
 
 	s.Require().NoError(err)
-	s.Equal("the.jwt.token", token)
-	s.Equal(fixedNow.Add(4*time.Hour), expiresAt)
+	s.Equal("the.jwt.token", tok.AccessToken)
+	s.Equal("refresh-abc", tok.RefreshToken)
+	s.Equal(fixedNow.Add(4*time.Hour), tok.ExpiresAt)
 
 	s.Equal("authorization_code", s.issuer.gotGrantType)
 	s.Equal("tempogate-cli", s.issuer.gotClientID, "default client_id")
 }
 
 func (s *LoopbackSuite) TestPKCEVerifierIsSpecCompliant() {
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().NoError(err)
 
 	v := s.issuer.gotVerifier
@@ -165,7 +167,7 @@ func (s *LoopbackSuite) TestPKCEVerifierIsSpecCompliant() {
 }
 
 func (s *LoopbackSuite) TestCustomClientIDIsSent() {
-	_, _, err := s.newFlow(cli.WithClientID("my-cli")).Run(context.Background())
+	_, err := s.newFlow(cli.WithClientID("my-cli")).Run(context.Background())
 	s.Require().NoError(err)
 	s.Equal("my-cli", s.issuer.gotClientID)
 }
@@ -178,7 +180,7 @@ func (s *LoopbackSuite) TestStateMismatchAborts() {
 		})
 	}
 
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "state did not match")
 }
@@ -192,7 +194,7 @@ func (s *LoopbackSuite) TestUpstreamErrorIsSurfaced() {
 		})
 	}
 
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "access_denied")
 	s.Contains(err.Error(), "user declined consent")
@@ -208,7 +210,7 @@ func (s *LoopbackSuite) TestTokenEndpointErrorIsSurfaced() {
 		})
 	}
 
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "invalid_grant")
 	s.Contains(err.Error(), "PKCE verification failed")
@@ -217,7 +219,7 @@ func (s *LoopbackSuite) TestTokenEndpointErrorIsSurfaced() {
 func (s *LoopbackSuite) TestCallbackTimeoutExits() {
 	noop := func(string) error { return nil } // browser never returns a code
 
-	_, _, err := s.newFlow(
+	_, err := s.newFlow(
 		cli.WithOpenBrowser(noop),
 		cli.WithCallbackTimeout(50*time.Millisecond),
 	).Run(context.Background())
@@ -235,7 +237,7 @@ func (s *LoopbackSuite) TestContextCancellationExits() {
 		cancel()
 	}()
 
-	_, _, err := s.newFlow(
+	_, err := s.newFlow(
 		cli.WithOpenBrowser(noop),
 		cli.WithCallbackTimeout(5*time.Second),
 	).Run(ctx)
@@ -245,7 +247,7 @@ func (s *LoopbackSuite) TestContextCancellationExits() {
 }
 
 func (s *LoopbackSuite) TestMissingIssuerIsRejected() {
-	_, _, err := cli.New().Run(context.Background())
+	_, err := cli.New().Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "issuer is required")
 }
@@ -254,7 +256,7 @@ func (s *LoopbackSuite) TestOutputAndHTTPClientOptionsArePlumbed() {
 	var out strings.Builder
 	hb := headlessBrowser()
 
-	token, _, err := cli.New(
+	tok, err := cli.New(
 		cli.WithIssuer(s.issuer.srv.URL),
 		cli.WithOpenBrowser(hb),
 		cli.WithClock(func() time.Time { return fixedNow }),
@@ -265,7 +267,7 @@ func (s *LoopbackSuite) TestOutputAndHTTPClientOptionsArePlumbed() {
 	).Run(context.Background())
 
 	s.Require().NoError(err)
-	s.Equal("the.jwt.token", token)
+	s.Equal("the.jwt.token", tok.AccessToken)
 	s.Contains(out.String(), "Opening your browser")
 }
 
@@ -277,18 +279,18 @@ func (s *LoopbackSuite) TestBrowserOpenErrorIsToleratedNotFatal() {
 		return errBrowser
 	}
 
-	token, _, err := s.newFlow(
+	tok, err := s.newFlow(
 		cli.WithOpenBrowser(failingOpener),
 		cli.WithOutput(&out),
 	).Run(context.Background())
 
 	s.Require().NoError(err, "a failed browser launch must not abort the flow")
-	s.Equal("the.jwt.token", token)
+	s.Equal("the.jwt.token", tok.AccessToken)
 	s.Contains(out.String(), "Could not open a browser automatically")
 }
 
 func (s *LoopbackSuite) TestInvalidPortFailsToBind() {
-	_, _, err := s.newFlow(cli.WithPort(-1)).Run(context.Background())
+	_, err := s.newFlow(cli.WithPort(-1)).Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "bind loopback listener")
 }
@@ -298,7 +300,7 @@ func (s *LoopbackSuite) TestCallbackWithoutCodeAborts() {
 		redirectBack(w, r, url.Values{"state": {r.URL.Query().Get("state")}})
 	}
 
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "no authorization code")
 }
@@ -309,7 +311,7 @@ func (s *LoopbackSuite) TestTokenResponseWithoutAccessTokenIsRejected() {
 		_, _ = w.Write([]byte(`{"token_type":"Bearer","expires_in":14400}`))
 	}
 
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "no access_token")
 }
@@ -320,7 +322,7 @@ func (s *LoopbackSuite) TestNonOAuthTokenErrorReportsStatus() {
 		_, _ = w.Write([]byte("upstream is down"))
 	}
 
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "HTTP 502")
 }
@@ -329,7 +331,7 @@ func (s *LoopbackSuite) TestDefaultClockIsUsedWhenUnset() {
 	// No WithClock: the production now() must run and yield an expiry ~4h out
 	// (happyToken returns expires_in=14400).
 	before := time.Now()
-	_, expiresAt, err := cli.New(
+	tok, err := cli.New(
 		cli.WithIssuer(s.issuer.srv.URL),
 		cli.WithOpenBrowser(headlessBrowser()),
 		cli.WithCallbackTimeout(5*time.Second),
@@ -337,13 +339,13 @@ func (s *LoopbackSuite) TestDefaultClockIsUsedWhenUnset() {
 	after := time.Now()
 
 	s.Require().NoError(err)
-	s.WithinRange(expiresAt,
+	s.WithinRange(tok.ExpiresAt,
 		before.Add(4*time.Hour-2*time.Second),
 		after.Add(4*time.Hour+2*time.Second))
 }
 
 func (s *LoopbackSuite) TestVerifierGenerationErrorAborts() {
-	_, _, err := s.newFlow(
+	_, err := s.newFlow(
 		cli.WithVerifierGenerator(func() (string, error) { return "", errGen }),
 	).Run(context.Background())
 
@@ -352,7 +354,7 @@ func (s *LoopbackSuite) TestVerifierGenerationErrorAborts() {
 }
 
 func (s *LoopbackSuite) TestStateGenerationErrorAborts() {
-	_, _, err := s.newFlow(
+	_, err := s.newFlow(
 		cli.WithStateGenerator(func() (string, error) { return "", errGen }),
 	).Run(context.Background())
 
@@ -369,7 +371,7 @@ func (s *LoopbackSuite) TestTokenEndpointConnectionErrorIsSurfaced() {
 		_ = conn.Close() // drop the POST mid-flight: Do returns an error
 	}
 
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "token request")
 }
@@ -380,7 +382,7 @@ func (s *LoopbackSuite) TestMalformedTokenJSONIsRejected() {
 		_, _ = w.Write([]byte("<<< not json >>>"))
 	}
 
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "decode token response")
 }
@@ -389,7 +391,7 @@ func (s *LoopbackSuite) TestLoopbackRedirectURIShape() {
 	// The ephemeral default must still produce a 127.0.0.1 loopback callback
 	// URI built from the actually-bound port, never a wildcard or hostname —
 	// that is what tempogate's client-registry prefix is validated against.
-	_, _, err := s.newFlow().Run(context.Background())
+	_, err := s.newFlow().Run(context.Background())
 	s.Require().NoError(err)
 	s.Regexp(`^http://127\.0\.0\.1:\d+/callback$`, s.issuer.gotRedirectURI)
 }

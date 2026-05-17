@@ -161,26 +161,26 @@ type callbackResult struct {
 }
 
 // Run performs the full loopback authorization-code round-trip and returns the
-// access token plus its absolute expiry. It binds 127.0.0.1 before opening the
-// browser so the redirect cannot race the listener, validates the state echo,
-// and exchanges the code with the PKCE verifier at /token.
-func (f *Flow) Run(ctx context.Context) (accessToken string, expiresAt time.Time, err error) {
+// Token (access + refresh + absolute expiry). It binds 127.0.0.1 before
+// opening the browser so the redirect cannot race the listener, validates the
+// state echo, and exchanges the code with the PKCE verifier at /token.
+func (f *Flow) Run(ctx context.Context) (Token, error) {
 	if f.issuer == "" {
-		return "", time.Time{}, errors.New("cli: issuer is required (pass --issuer or set TEMPOGATE__ISSUER)")
+		return Token{}, errors.New("cli: issuer is required (pass --issuer or set TEMPOGATE__ISSUER)")
 	}
 
 	verifier, err := f.newVerifier()
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("cli: generate PKCE verifier: %w", err)
+		return Token{}, fmt.Errorf("cli: generate PKCE verifier: %w", err)
 	}
 	state, err := f.newState()
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("cli: generate state: %w", err)
+		return Token{}, fmt.Errorf("cli: generate state: %w", err)
 	}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", f.port))
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("cli: bind loopback listener: %w", err)
+		return Token{}, fmt.Errorf("cli: bind loopback listener: %w", err)
 	}
 	defer func() { _ = lis.Close() }()
 
@@ -206,7 +206,7 @@ func (f *Flow) Run(ctx context.Context) (accessToken string, expiresAt time.Time
 
 	code, err := f.awaitCode(ctx, resultCh)
 	if err != nil {
-		return "", time.Time{}, err
+		return Token{}, err
 	}
 
 	return f.exchange(ctx, code, verifier, redirectURI)
@@ -284,11 +284,14 @@ func (f *Flow) authorizeURL(redirectURI, verifier, state string) string {
 	return f.issuer + oidc.AuthorizePath + "?" + q.Encode()
 }
 
-// tokenResponse is the RFC 6749 §5.1 success body subset the CLI needs.
+// tokenResponse is the RFC 6749 §5.1 success body subset the CLI needs. It is
+// shared by the authorization-code exchange and the refresh-token grant; both
+// rotate the refresh token, so RefreshToken is always read back.
 type tokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
 }
 
 // oauthErrorBody is the RFC 6749 §5.2 error body tempogate returns on a failed
@@ -298,10 +301,53 @@ type oauthErrorBody struct {
 	Desc string `json:"error_description"`
 }
 
-// exchange POSTs the authorization code + PKCE verifier to /token and turns
-// the response into an access token and an absolute expiry computed off the
-// injected clock (so callers can persist a refresh deadline).
-func (f *Flow) exchange(ctx context.Context, code, verifier, redirectURI string) (string, time.Time, error) {
+// postTokenForm POSTs an application/x-www-form-urlencoded body to
+// <issuer>/token and decodes the RFC 6749 token response. It is the single
+// place the HTTP round-trip, the OAuth2 error mapping, and the success-shape
+// validation live, so the authorization-code and refresh-token grants cannot
+// diverge in how they talk to the endpoint.
+func postTokenForm(ctx context.Context, client *http.Client, issuer string, form url.Values) (tokenResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		issuer+oidc.TokenPath, strings.NewReader(form.Encode()))
+	if err != nil {
+		return tokenResponse{}, fmt.Errorf("cli: build token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return tokenResponse{}, fmt.Errorf("cli: token request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return tokenResponse{}, fmt.Errorf("cli: read token response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var oe oauthErrorBody
+		if json.Unmarshal(body, &oe) == nil && oe.Err != "" {
+			return tokenResponse{}, fmt.Errorf("cli: token exchange rejected (%s): %s", oe.Err, oe.Desc)
+		}
+		return tokenResponse{}, fmt.Errorf("cli: token exchange failed: HTTP %d", resp.StatusCode)
+	}
+
+	var tr tokenResponse
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return tokenResponse{}, fmt.Errorf("cli: decode token response: %w", err)
+	}
+	if tr.AccessToken == "" {
+		return tokenResponse{}, errors.New("cli: token response contained no access_token")
+	}
+	return tr, nil
+}
+
+// exchange swaps the authorization code (+ PKCE verifier) for a Token. The
+// absolute expiry is computed off the injected clock so callers can persist a
+// refresh deadline.
+func (f *Flow) exchange(ctx context.Context, code, verifier, redirectURI string) (Token, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
@@ -309,43 +355,15 @@ func (f *Flow) exchange(ctx context.Context, code, verifier, redirectURI string)
 	form.Set("client_id", f.clientID)
 	form.Set("code_verifier", verifier)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		f.issuer+oidc.TokenPath, strings.NewReader(form.Encode()))
+	tr, err := postTokenForm(ctx, f.httpClient, f.issuer, form)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("cli: build token request: %w", err)
+		return Token{}, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := f.httpClient.Do(req)
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("cli: token request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("cli: read token response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var oe oauthErrorBody
-		if json.Unmarshal(body, &oe) == nil && oe.Err != "" {
-			return "", time.Time{}, fmt.Errorf("cli: token exchange rejected (%s): %s", oe.Err, oe.Desc)
-		}
-		return "", time.Time{}, fmt.Errorf("cli: token exchange failed: HTTP %d", resp.StatusCode)
-	}
-
-	var tr tokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return "", time.Time{}, fmt.Errorf("cli: decode token response: %w", err)
-	}
-	if tr.AccessToken == "" {
-		return "", time.Time{}, errors.New("cli: token response contained no access_token")
-	}
-
-	expiresAt := f.now().Add(time.Duration(tr.ExpiresIn) * time.Second)
-	return tr.AccessToken, expiresAt, nil
+	return Token{
+		AccessToken:  tr.AccessToken,
+		RefreshToken: tr.RefreshToken,
+		ExpiresAt:    f.now().Add(time.Duration(tr.ExpiresIn) * time.Second),
+	}, nil
 }
 
 // writePage renders the loopback browser page. msg can carry the upstream

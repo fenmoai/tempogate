@@ -29,11 +29,11 @@ Self-hosted Temporal ships two extension points: the Web UI consumes any OIDC is
 └──────────────┘
 ```
 
-A single binary, distroless-shipped, with subcommands `serve`, `login`, `keys`, `migrate`, `version`. State is pluggable; the default is SQLite-on-PVC via pure-Go `modernc.org/sqlite`.
+A single binary, distroless-shipped, with subcommands `serve`, `login`, `token`, `keys`, `migrate`, `version`. State is pluggable; the default is SQLite-on-PVC via pure-Go `modernc.org/sqlite`.
 
 ## Quick start
 
-> **Status:** v0 — health/readiness, `/.well-known/jwks.json`, the full `/.well-known/openid-configuration`, and the OIDC SSO flow (`/authorize`, `/callback/google`, `/token`, `/userinfo`) are wired, as is `tempogate login` for personal tokens from a laptop. PKCE is mandatory by default with a narrow, secret-gated carve-out for older-style confidential clients such as the Temporal Web UI — see [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md).
+> **Status:** v0 — health/readiness, `/.well-known/jwks.json`, the full `/.well-known/openid-configuration`, and the OIDC SSO flow (`/authorize`, `/callback/google`, `/token`, `/userinfo`) are wired, as is `tempogate login` + `tempogate token` for personal tokens from a laptop (persisted `0600` and auto-refreshed near expiry). PKCE is mandatory by default with a narrow, secret-gated carve-out for older-style confidential clients such as the Temporal Web UI — see [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md).
 
 Once a release is cut, pull a tagged multi-arch image:
 
@@ -73,15 +73,20 @@ without hand-editing any config:
 
 ```bash
 export TEMPOGATE__ISSUER=https://tempogate.example.com
-export TEMPORAL_AUTH_TOKEN=$(tempogate login)   # opens a browser, prints the JWT
+
+tempogate login                                  # browser sign-in, once
+export TEMPORAL_AUTH_TOKEN=$(tempogate token)    # thereafter; auto-refreshes
 ```
 
 `tempogate login` starts a one-shot `127.0.0.1` server, opens your browser to
-sign in via Google, and prints the token to stdout (progress goes to stderr).
-A fresh ephemeral loopback port is used each run — no Google Cloud Console
-edits, just one `OIDC__CLIENTS` entry on the server. See
-[docs/cli-loopback-login.md](docs/cli-loopback-login.md) for the operator
-one-liner and why ephemeral ports work.
+sign in via Google, prints the token, and persists it to
+`~/.tempogate/token.json` (`0600`). A fresh ephemeral loopback port is used
+each run — no Google Cloud Console edits, just one `OIDC__CLIENTS` entry on
+the server. `tempogate token` then reuses that file, transparently refreshing
+the token five minutes before it expires, so it never re-opens a browser.
+Both print only the token to stdout, so they are safe in `$(...)`. See
+[docs/cli-loopback-login.md](docs/cli-loopback-login.md) for persistence,
+auto-refresh, the operator one-liner, and why ephemeral ports work.
 
 A `docker-compose` example wiring tempogate alongside `temporalio/server` + `temporalio/ui` lands in `examples/docker-compose/` once E3 (OIDC) ships.
 
