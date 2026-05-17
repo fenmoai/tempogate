@@ -60,3 +60,60 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Name of the non-secret env ConfigMap.
+*/}}
+{{- define "tempogate.configMapName" -}}
+{{- printf "%s-config" (include "tempogate.fullname" .) }}
+{{- end }}
+
+{{/*
+PVC name for the SQLite state store: an operator-supplied existingClaim
+when set, otherwise the chart-managed claim.
+*/}}
+{{- define "tempogate.pvcName" -}}
+{{- if .Values.persistence.existingClaim }}
+{{- .Values.persistence.existingClaim }}
+{{- else }}
+{{- printf "%s-state" (include "tempogate.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Secret-derived env entries plus user extraEnv. Shared verbatim by the
+Deployment and the migrate Job so both see identical configuration. The
+non-secret vars come from the ConfigMap via envFrom (see each workload).
+*/}}
+{{- define "tempogate.secretEnv" -}}
+{{- with .Values.auth.upstream.google.clientIdSecretRef }}
+{{- if .name }}
+- name: OIDC__GOOGLE__CLIENT_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ .name }}
+      key: {{ required "auth.upstream.google.clientIdSecretRef.key is required when .name is set" .key }}
+{{- end }}
+{{- end }}
+{{- with .Values.auth.upstream.google.clientSecretSecretRef }}
+{{- if .name }}
+- name: OIDC__GOOGLE__CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ .name }}
+      key: {{ required "auth.upstream.google.clientSecretSecretRef.key is required when .name is set" .key }}
+{{- end }}
+{{- end }}
+{{- with .Values.auth.clientSecretsSecretRef }}
+{{- if .name }}
+- name: OIDC__CLIENT_SECRETS
+  valueFrom:
+    secretKeyRef:
+      name: {{ .name }}
+      key: {{ required "auth.clientSecretsSecretRef.key is required when .name is set" .key }}
+{{- end }}
+{{- end }}
+{{- with .Values.extraEnv }}
+{{- toYaml . | nindent 0 }}
+{{- end }}
+{{- end }}

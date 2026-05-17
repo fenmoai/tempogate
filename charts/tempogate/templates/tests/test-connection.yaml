@@ -11,5 +11,8 @@ spec:
     - name: wget
       image: busybox
       command: ['wget']
-      args: ['{{ include "tempogate.fullname" . }}:{{ .Values.service.port }}']
+      args:
+        - '-q'
+        - '-O-'
+        - 'http://{{ include "tempogate.fullname" . }}:{{ .Values.service.port }}/healthz'
   restartPolicy: Never
