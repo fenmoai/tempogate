@@ -1,0 +1,6 @@
+# The end-to-end harness and its standalone mock IdP are exercised by the
+# dedicated `e2e` workflow, not the unit suite, so they carry no unit
+# coverage by design. Excluding them keeps project/patch coverage a true
+# reflection of the library code under test rather than test scaffolding.
+ignore:
+  - "test/e2e/**"
