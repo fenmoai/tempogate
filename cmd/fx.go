@@ -45,6 +45,7 @@ func Run(p RunParams) {
 		WithSubcommand(newServeCmd(p)),
 		WithSubcommand(newMigrateCmd(p)),
 		WithSubcommand(newKeysCmd(p)),
+		WithSubcommand(newLoginCmd(p)),
 	)
 	done := make(chan struct{})
 
