@@ -136,6 +136,33 @@ func (s *AuthorizeSuite) TestValidRequestRedirectsToGoogle() {
 	s.Equal(fixedState, q.Get("state"))
 }
 
+// TestPathIssuerRedirectURICarriesPrefix is the contract that makes sub-path
+// hosting work: oidc.New already trims/uses the issuer verbatim, so a
+// path-prefixed issuer (e.g. https://h/idp) yields a prefixed Google
+// redirect_uri (https://h/idp/callback/google). The Authorizer needs no
+// path-awareness of its own — this guards that property from regressing.
+func (s *AuthorizeSuite) TestPathIssuerRedirectURICarriesPrefix() {
+	reg, err := oidc.ParseClientRegistry("ui:https://app.example.com/auth")
+	s.Require().NoError(err)
+	a := oidc.New(s.store, reg, testIssuer+"/idp", testGoogleCID, testGoogleAuth,
+		oidc.WithClock(func() time.Time { return fixedNow }),
+		oidc.WithStateGenerator(func() (string, error) { return fixedState, nil }),
+	)
+	mux := http.NewServeMux()
+	a.Register(humago.New(mux, huma.DefaultConfig("test", "0.0.0")))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp := s.get(srv, validParams())
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusFound, resp.StatusCode)
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	s.Require().NoError(err)
+	s.Equal(testIssuer+"/idp/callback/google", loc.Query().Get("redirect_uri"),
+		"a path-prefixed issuer must yield a prefixed Google redirect_uri")
+}
+
 func (s *AuthorizeSuite) TestValidRequestPersistsAuthRequestWithTTL() {
 	resp := s.get(s.srv, validParams())
 	defer resp.Body.Close()

@@ -150,7 +150,12 @@ log:
 oidc:
   # Externally reachable base URL of this server. Advertised as `issuer`
   # and used to derive jwks_uri in the discovery document, e.g.
-  # https://tempogate.internal.example.com
+  # https://tempogate.example.com
+  #
+  # May include a path to share a hostname with another app (sub-path
+  # hosting), e.g. https://tempogate.example.com/idp — the whole OIDC surface
+  # then serves under that prefix. /healthz and /readyz stay at the root
+  # regardless, so the probe paths below need no change.
   issuer: ""
 
 auth:
