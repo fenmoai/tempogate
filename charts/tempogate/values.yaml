@@ -2,160 +2,193 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# This will set the replicaset count more information can be found here: https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/
+# tempogate's default state store is SQLite on a single ReadWriteOnce PVC,
+# and SQLite tolerates exactly one writer process. Running more than one
+# replica would corrupt state. Horizontal scaling needs a shared backend
+# (planned upstream); until then this MUST stay 1 and `autoscaling` MUST
+# stay disabled. The Deployment uses the Recreate strategy for the same
+# reason — two pods cannot hold the PVC writer at once.
 replicaCount: 1
 
-# This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
 image:
-  repository: nginx
-  # This sets the pull policy for images.
+  repository: ghcr.io/fenmoai/tempogate
   pullPolicy: IfNotPresent
-  # Overrides the image tag whose default is the chart appVersion.
+  # Defaults to the chart appVersion when empty.
   tag: ""
 
-# This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
 imagePullSecrets: []
-# This is to override the chart name.
 nameOverride: ""
 fullnameOverride: ""
 
-# This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
-  # Specifies whether a service account should be created.
   create: true
-  # Automatically mount a ServiceAccount's API credentials?
   automount: true
-  # Annotations to add to the service account.
   annotations: {}
-  # The name of the service account to use.
-  # If not set and create is true, a name is generated using the fullname template.
+  # Generated from the fullname template when empty and create is true.
   name: ""
 
-# This is for setting Kubernetes Annotations to a Pod.
-# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
 podAnnotations: {}
-# This is for setting Kubernetes Labels to a Pod.
-# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 podLabels: {}
 
-podSecurityContext: {}
-  # fsGroup: 2000
+# The distroless `nonroot` user/group is uid/gid 65532. fsGroup makes the
+# mounted state PVC group-writable so the SQLite file can be created.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
 
-securityContext: {}
-  # capabilities:
-  #   drop:
-  #   - ALL
-  # readOnlyRootFilesystem: true
-  # runAsNonRoot: true
-  # runAsUser: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
 
-# This is for setting up a service more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/
 service:
-  # This sets the service type more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types
   type: ClusterIP
-  # This sets the ports more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#field-spec-ports
-  port: 80
+  # tempogate currently exposes a SINGLE HTTP listener that serves the
+  # public OIDC/OAuth2 surface together with /healthz and /readyz. A
+  # dedicated admin listener is planned upstream; when it lands the chart
+  # gains a `service.admin` block without changing this key.
+  port: 8000
 
-# This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
+# HTTP__LISTENER bind address. The binary defaults to 127.0.0.1, which is
+# unreachable through a Service; in-cluster it MUST bind all interfaces.
+listenAddress: 0.0.0.0
+
 ingress:
   enabled: false
   className: ""
   annotations: {}
-    # kubernetes.io/ingress.class: nginx
     # kubernetes.io/tls-acme: "true"
   hosts:
-    - host: chart-example.local
+    - host: tempogate.example.com
       paths:
         - path: /
-          pathType: ImplementationSpecific
+          pathType: Prefix
   tls: []
-    # - secretName: chart-example-tls
+    # - secretName: tempogate-tls
     #   hosts:
-    #     - chart-example.local
+    #     - tempogate.example.com
 
-# -- Expose the service via gateway-api HTTPRoute
-# Requires Gateway API resources and suitable controller installed within the cluster
-# (see: https://gateway-api.sigs.k8s.io/guides/)
+# Gateway API alternative to ingress. Disabled by default; requires Gateway
+# API CRDs and a controller (https://gateway-api.sigs.k8s.io/guides/).
 httpRoute:
-  # HTTPRoute enabled.
   enabled: false
-  # HTTPRoute annotations.
   annotations: {}
-  # Which Gateways this Route is attached to.
   parentRefs:
-  - name: gateway
-    sectionName: http
-    # namespace: default
-  # Hostnames matching HTTP header.
+    - name: gateway
+      sectionName: http
   hostnames:
-  - chart-example.local
-  # List of rules and filters applied.
+    - tempogate.example.com
   rules:
-  - matches:
-    - path:
-        type: PathPrefix
-        value: /headers
-  #   filters:
-  #   - type: RequestHeaderModifier
-  #     requestHeaderModifier:
-  #       set:
-  #       - name: My-Overwrite-Header
-  #         value: this-is-the-only-value
-  #       remove:
-  #       - User-Agent
-  # - matches:
-  #   - path:
-  #       type: PathPrefix
-  #       value: /echo
-  #     headers:
-  #     - name: version
-  #       value: v2
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
 
-resources: {}
-  # We usually recommend not to specify default resources and to leave this as a conscious
-  # choice for the user. This also increases chances charts run on environments with little
-  # resources, such as Minikube. If you do want to specify resources, uncomment the following
-  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
 
-# This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 livenessProbe:
   httpGet:
-    path: /
+    path: /healthz
     port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
 readinessProbe:
   httpGet:
-    path: /
+    path: /readyz
     port: http
+  initialDelaySeconds: 2
+  periodSeconds: 5
+# Guards a slow first boot (keypair bootstrap on an empty state store)
+# without making the liveness probe lenient.
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 3
+  failureThreshold: 20
 
-# This section is for setting up autoscaling more information can be found here: https://kubernetes.io/docs/concepts/workloads/autoscaling/
+# Off by default and pinned to one replica — see the replicaCount comment
+# for why tempogate cannot be scaled horizontally yet.
 autoscaling:
   enabled: false
   minReplicas: 1
-  maxReplicas: 100
+  maxReplicas: 1
   targetCPUUtilizationPercentage: 80
   # targetMemoryUtilizationPercentage: 80
 
-# Additional volumes on the output Deployment definition.
-volumes: []
-  # - name: foo
-  #   secret:
-  #     secretName: mysecret
-  #     optional: false
+# Persistent volume for the SQLite state store: the signing keypair, auth
+# codes, and refresh tokens. Losing it rotates signing keys and invalidates
+# every issued refresh token, so back it with durable storage in production.
+persistence:
+  enabled: true
+  # Bind an existing PVC instead of creating one. When set, size /
+  # storageClass / accessMode below are ignored.
+  existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  annotations: {}
 
-# Additional volumeMounts on the output Deployment definition.
+# Where tempogate keeps its SQLite database. sqlitePath MUST live under
+# mountPath so the database lands on the PVC above.
+state:
+  mountPath: /var/lib/tempogate
+  sqlitePath: /var/lib/tempogate/state.db
+
+log:
+  level: info
+
+oidc:
+  # Externally reachable base URL of this server. Advertised as `issuer`
+  # and used to derive jwks_uri in the discovery document, e.g.
+  # https://tempogate.internal.example.com
+  issuer: ""
+
+auth:
+  # Comma-separated `id:redirect_uri_prefix` client allowlist
+  # (OIDC__CLIENTS). Non-secret.
+  clients: ""
+  # Email domains permitted to complete SSO. Empty ⇒ nobody is admitted.
+  allowedDomains: []
+  # Optional confidential-client carve-out (OIDC__CLIENT_SECRETS) — secret
+  # material. Supply it via an existing Secret, never as plaintext here.
+  clientSecretsSecretRef:
+    name: ""
+    key: ""
+  upstream:
+    google:
+      # Upstream Google OAuth2 client. clientId and clientSecret are read
+      # from existing Secrets you create out of band.
+      clientIdSecretRef:
+        name: ""
+        key: ""
+      clientSecretSecretRef:
+        name: ""
+        key: ""
+      # Endpoint overrides for testing against a mock IdP. Leave blank to
+      # use Google's real endpoints (baked into the binary).
+      authEndpoint: ""
+      tokenEndpoint: ""
+      issuerUrl: ""
+
+# Extra environment variables appended verbatim to the container (and the
+# migrate Job), e.g. [{name: STATE__SQLITE__BUSY_TIMEOUT, value: "10s"}].
+extraEnv: []
+
+# Extra volumes / mounts on the Deployment (the state PVC is wired
+# automatically from `persistence`).
+volumes: []
 volumeMounts: []
-  # - name: foo
-  #   mountPath: "/etc/foo"
-  #   readOnly: true
 
 nodeSelector: {}
-
 tolerations: []
-
 affinity: {}
