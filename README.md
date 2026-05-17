@@ -33,7 +33,7 @@ A single binary, distroless-shipped, with subcommands `serve`, `login`, `keys`, 
 
 ## Quick start
 
-> **Status:** v0 — health/readiness, `/.well-known/jwks.json`, the full `/.well-known/openid-configuration`, and the OIDC SSO flow (`/authorize`, `/callback/google`, `/token`, `/userinfo`) are wired. PKCE is mandatory by default with a narrow, secret-gated carve-out for older-style confidential clients such as the Temporal Web UI — see [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md).
+> **Status:** v0 — health/readiness, `/.well-known/jwks.json`, the full `/.well-known/openid-configuration`, and the OIDC SSO flow (`/authorize`, `/callback/google`, `/token`, `/userinfo`) are wired, as is `tempogate login` for personal tokens from a laptop. PKCE is mandatory by default with a narrow, secret-gated carve-out for older-style confidential clients such as the Temporal Web UI — see [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md).
 
 Once a release is cut, pull a tagged multi-arch image:
 
@@ -66,6 +66,23 @@ docker build -t tempogate:dev .
 docker run --rm -p 8000:8000 tempogate:dev
 ```
 
+### Personal tokens from a laptop
+
+Once the server is reachable, an engineer mints a short-lived Temporal JWT
+without hand-editing any config:
+
+```bash
+export TEMPOGATE__ISSUER=https://tempogate.example.com
+export TEMPORAL_AUTH_TOKEN=$(tempogate login)   # opens a browser, prints the JWT
+```
+
+`tempogate login` starts a one-shot `127.0.0.1` server, opens your browser to
+sign in via Google, and prints the token to stdout (progress goes to stderr).
+A fresh ephemeral loopback port is used each run — no Google Cloud Console
+edits, just one `OIDC__CLIENTS` entry on the server. See
+[docs/cli-loopback-login.md](docs/cli-loopback-login.md) for the operator
+one-liner and why ephemeral ports work.
+
 A `docker-compose` example wiring tempogate alongside `temporalio/server` + `temporalio/ui` lands in `examples/docker-compose/` once E3 (OIDC) ships.
 
 ## Configuration
@@ -77,6 +94,8 @@ Configuration is layered: defaults → optional `application.yaml` → environme
 | `LOG__LEVEL`     | `info`           | `debug` / `info` / `warn` / `error`  |
 | `HTTP__LISTENER` | `127.0.0.1:8000` | `host:port` for the public listener |
 | `OIDC__ISSUER`   | `http://127.0.0.1:8000` | Externally reachable base URL; advertised as `issuer` and used to derive `jwks_uri` in the discovery document (e.g. `https://tempogate.internal.<domain>`) |
+| `OIDC__CLIENTS`  | _(empty)_        | Comma-separated `id:redirect_uri_prefix` client allowlist. Register the CLI as `tempogate-cli:http://127.0.0.1:` for `tempogate login` — see [docs/cli-loopback-login.md](docs/cli-loopback-login.md) |
+| `TEMPOGATE__ISSUER` | _(empty)_     | **Client-side**, read by `tempogate login` (not the server): the tempogate base URL to sign in against. Equivalent to `--issuer` |
 
 More keys (admin listener, JWKS storage, upstream Google client) arrive with their respective releases.
 
