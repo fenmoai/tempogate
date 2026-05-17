@@ -139,8 +139,6 @@ one), so a captured `token.json` is usable at most until the next refresh.
 
 ## Security properties
 
-## Security properties
-
 * **PKCE S256, mandatory.** The CLI is a public client: it generates a
   43-char (RFC 7636 §4.1 minimum) `code_verifier`, sends
   `BASE64URL(SHA256(verifier))` at `/authorize`, and presents the raw

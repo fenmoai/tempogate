@@ -1,6 +1,6 @@
 // Package api is the public HTTP surface. Today it serves only /healthz and
 // /readyz under no prefix; OIDC, JWKS, and admin endpoints land in later
-// epics by appending huma operations to the same Result.API.
+// modules by appending huma operations to the same Result.API.
 package api
 
 import (
@@ -20,7 +20,7 @@ type apiConfig struct {
 
 type Option func(*apiConfig)
 
-// WithRegistrar lets future epics (OIDC, admin, JWKS) plug additional Huma
+// WithRegistrar lets future modules (OIDC, admin, JWKS) plug additional Huma
 // route registrations into the same humago adapter.
 func WithRegistrar(fn func(huma.API)) Option {
 	return func(c *apiConfig) { c.registrars = append(c.registrars, fn) }

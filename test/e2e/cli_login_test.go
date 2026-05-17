@@ -8,7 +8,7 @@
 // `tempogate token` is then exercised on both its fast path and its
 // refresh-near-expiry path.
 //
-// Spike S3 — Google loopback redirect strategy — resolved as **ephemeral
+// Google loopback redirect strategy — resolved as **ephemeral
 // port** (the recommended default; `tempogate login` is run here with no
 // --port). This works with zero per-user identity-provider registration
 // because the CLI never talks to Google directly: the only redirect Google
@@ -99,7 +99,7 @@ func TestCLILogin(t *testing.T) {
 		strings.HasPrefix(authURL, tempogateIssuer+"/authorize?"),
 		"login must open tempogate's /authorize, got %q", authURL)
 	require.Contains(t, authURL, "redirect_uri=http%3A%2F%2F127.0.0.1%3A",
-		"the loopback redirect must be an ephemeral 127.0.0.1 port (Spike S3: ephemeral)")
+		"the loopback redirect must be an ephemeral 127.0.0.1 port")
 	require.Contains(t, authURL, "code_challenge_method=S256", "PKCE S256 is mandatory for the public CLI client")
 
 	st.driveConsent(ctx, t, authURL)
@@ -289,7 +289,7 @@ func setupCLIStack(ctx context.Context, t *testing.T) *cliStack {
 
 	// --- tempogate: migrate then serve. The CLI is registered as a *public*
 	// client (no secret ⇒ PKCE mandatory) with a 127.0.0.1: redirect prefix,
-	// so any ephemeral loopback port is accepted (Spike S3).
+	// so any ephemeral loopback port is accepted.
 	tgEnv := map[string]string{
 		"HTTP__LISTENER":               "0.0.0.0:8000",
 		"STATE__SQLITE__PATH":          "/state/state.db",

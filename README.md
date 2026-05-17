@@ -1,26 +1,45 @@
 # tempogate
 
-> Drop-in **OIDC provider** and **OAuth2 authorization server** for self-hosted [Temporal](https://temporal.io/).
-
 [![ci](https://github.com/fenmoai/tempogate/actions/workflows/ci.yml/badge.svg)](https://github.com/fenmoai/tempogate/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/fenmoai/tempogate.svg)](https://pkg.go.dev/github.com/fenmoai/tempogate)
 [![codecov](https://codecov.io/gh/fenmoai/tempogate/graph/badge.svg?token=6WiKK8pF1p)](https://codecov.io/gh/fenmoai/tempogate)
 
----
+> A single-binary OIDC provider and OAuth2 authorization server that gives
+> self-hosted [Temporal](https://temporal.io/) browser SSO and JWT machine-auth
+> without forking `temporal-server` or running a sidecar proxy.
 
-## Why
+## Overview
 
-Self-hosted Temporal ships two extension points: the Web UI consumes any OIDC issuer via `TEMPORAL_AUTH_*` env vars, and the gRPC frontend verifies JWTs via a configurable JWKS endpoint and a `permissions: ["<namespace>:<action>", ...]` claim. Together they cover the SSO + machine-auth story **without forking `temporal-server` and without a sidecar reverse proxy** — provided someone supplies the issuer.
+Self-hosted Temporal can authenticate users and services, but only if you
+supply an OIDC issuer. `tempogate` is that issuer. It federates sign-in to
+Google, mints short-lived JWTs Temporal's stock authorizer already understands,
+and publishes the JWKS the gRPC frontend verifies against. It runs as one
+distroless binary and is aimed at teams operating their own Temporal cluster.
 
-`tempogate` is that issuer. Point your Web UI at `https://tempogate.<your-domain>` and your frontend's `global.authorization.jwtKeyProvider.keySourceURIs` at `https://tempogate.<your-domain>/.well-known/jwks.json`. Mint long-lived integration keys via an admin API; mint 4-hour personal tokens via `tempogate login` from a developer laptop. Multi-tenant namespace scoping is in the JWT itself.
+## Why it exists
 
-## Architecture
+Self-hosted Temporal ships two extension points:
+
+- the **Web UI** consumes any OIDC issuer via `TEMPORAL_AUTH_*` env vars;
+- the **gRPC frontend** verifies JWTs against a configurable JWKS endpoint and
+  reads a `permissions: ["<namespace>:<action>", ...]` claim.
+
+Together these cover SSO and machine-auth — but only if something issues the
+tokens. The usual alternatives are forking `temporal-server` or putting a
+reverse proxy in front of it; both carry ongoing cost (see
+[the comparison below](#why-not-a-sidecar-proxy-or-a-fork)). `tempogate` fills
+the gap Temporal's own docs already describe: point the Web UI at
+`https://tempogate.<your-domain>` and the frontend's
+`global.authorization.jwtKeyProvider.keySourceURIs` at
+`https://tempogate.<your-domain>/.well-known/jwks.json`.
+
+## How it works
 
 ```
 ┌──────────────┐     OIDC      ┌────────────────────┐
 │ Temporal Web │ ─────────────▶│      tempogate     │ ──wraps──▶ Google OAuth2
-│      UI      │◀── our JWT ───│  (OIDC + OAuth2 AS)│
+│      UI      │◀── our JWT ───│  (OIDC + OAuth2 AS) │
 └──────┬───────┘               └────────────────────┘
        │ Bearer <tempogate JWT>          ▲
        ▼                                 │
@@ -30,20 +49,40 @@ Self-hosted Temporal ships two extension points: the Web UI consumes any OIDC is
 └──────────────┘
 ```
 
-A single binary, distroless-shipped, with subcommands `serve`, `login`, `token`, `keys`, `migrate`, `version`. State is pluggable; the default is SQLite-on-PVC via pure-Go `modernc.org/sqlite`.
+One binary with subcommands `serve`, `login`, `token`, `keys`, `migrate`,
+`version`. State is pluggable; the default is SQLite on a PVC via the pure-Go
+`modernc.org/sqlite` driver, with embedded migrations applied by
+`tempogate migrate`.
+
+## Status
+
+Wired and exercised end to end:
+
+- `/healthz`, `/readyz`
+- `/.well-known/jwks.json` and the full `/.well-known/openid-configuration`
+- OIDC SSO: `/authorize`, `/callback/google`, `/token`, `/userinfo`
+- `tempogate login` + `tempogate token` for personal tokens from a laptop
+  (persisted `0600`, auto-refreshed near expiry)
+- PKCE mandatory by default, with a narrow secret-gated carve-out for
+  confidential clients such as the Temporal Web UI — see
+  [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md)
+- OIDC Core `nonce` round-trip and `aud` stamping
+- Multi-arch distroless image and a Helm chart
+
+Authorization is currently flat: every admitted identity receives
+cluster-level access (`temporal-system:admin`), the value Temporal's default
+ClaimMapper needs for cluster APIs. Group- or role-derived per-namespace
+scoping, an admin API for long-lived integration keys, and a
+`docker-compose` example are planned.
 
 ## Quick start
 
-> **Status:** v0 — health/readiness, `/.well-known/jwks.json`, the full `/.well-known/openid-configuration`, and the OIDC SSO flow (`/authorize`, `/callback/google`, `/token`, `/userinfo`) are wired, as is `tempogate login` + `tempogate token` for personal tokens from a laptop (persisted `0600` and auto-refreshed near expiry). PKCE is mandatory by default with a narrow, secret-gated carve-out for older-style confidential clients such as the Temporal Web UI — see [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md).
-
-Once a release is cut, pull a tagged multi-arch image:
+Run a published image (once a release is cut):
 
 ```bash
 docker run --rm -p 8000:8000 ghcr.io/fenmoai/tempogate:latest
 curl http://127.0.0.1:8000/healthz
 ```
-
-Image tags:
 
 | Tag | Meaning |
 | --- | --- |
@@ -51,7 +90,7 @@ Image tags:
 | `:vX.Y.Z-rc.N` | Pre-releases |
 | `:sha-<short>` | One-off builds dispatched manually from a specific commit |
 
-Until the first tag is cut, build from source:
+Build from source:
 
 ```bash
 git clone git@github.com:fenmoai/tempogate.git
@@ -67,7 +106,10 @@ docker build -t tempogate:dev .
 docker run --rm -p 8000:8000 tempogate:dev
 ```
 
-### Personal tokens from a laptop
+Kubernetes deployment is covered by the chart in
+[`charts/tempogate/`](charts/tempogate/README.md).
+
+## Personal tokens from a laptop
 
 Once the server is reachable, an engineer mints a short-lived Temporal JWT
 without hand-editing any config:
@@ -82,44 +124,45 @@ export TEMPORAL_AUTH_TOKEN=$(tempogate token)    # thereafter; auto-refreshes
 `tempogate login` starts a one-shot `127.0.0.1` server, opens your browser to
 sign in via Google, prints the token, and persists it to
 `~/.tempogate/token.json` (`0600`). A fresh ephemeral loopback port is used
-each run — no Google Cloud Console edits, just one `OIDC__CLIENTS` entry on
-the server. `tempogate token` then reuses that file, transparently refreshing
-the token five minutes before it expires, so it never re-opens a browser.
-Both print only the token to stdout, so they are safe in `$(...)`. See
+each run — no Google Cloud Console edits, just one `OIDC__CLIENTS` entry on the
+server. `tempogate token` then reuses that file, refreshing the token five
+minutes before expiry, so it never re-opens a browser. Both print only the
+token to stdout, so they are safe in `$(...)`. See
 [docs/cli-loopback-login.md](docs/cli-loopback-login.md) for persistence,
 auto-refresh, the operator one-liner, and why ephemeral ports work.
 
-A `docker-compose` example wiring tempogate alongside `temporalio/server` + `temporalio/ui` lands in `examples/docker-compose/` once E3 (OIDC) ships.
-
 ## Configuration
 
-Configuration is layered: defaults → optional `application.yaml` → environment variables (env wins). Nested keys flatten with `__` as the separator.
+Configuration is layered: defaults, then an optional `application.yaml`, then
+environment variables (env wins). Nested keys flatten with `__` as the
+separator.
 
-| Env var          | Default          | Notes                                |
-| ---------------- | ---------------- | ------------------------------------ |
-| `LOG__LEVEL`     | `info`           | `debug` / `info` / `warn` / `error`  |
-| `HTTP__LISTENER` | `127.0.0.1:8000` | `host:port` for the public listener |
-| `OIDC__ISSUER`   | `http://127.0.0.1:8000` | Externally reachable base URL; advertised as `issuer` and used to derive `jwks_uri` in the discovery document (e.g. `https://tempogate.internal.<domain>`) |
-| `OIDC__CLIENTS`  | _(empty)_        | Comma-separated `id:redirect_uri_prefix` client allowlist. Register the CLI as `tempogate-cli:http://127.0.0.1:` for `tempogate login` — see [docs/cli-loopback-login.md](docs/cli-loopback-login.md) |
-| `TEMPOGATE__ISSUER` | _(empty)_     | **Client-side**, read by `tempogate login` (not the server): the tempogate base URL to sign in against. Equivalent to `--issuer` |
+| Env var | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `OIDC__ISSUER` | For real deploys | `http://127.0.0.1:8000` | Externally reachable base URL; advertised as `issuer` and used to derive `jwks_uri` |
+| `OIDC__CLIENTS` | For any login | _(empty)_ | Comma-separated `id:redirect_uri_prefix` allowlist. Register the CLI as `tempogate-cli:http://127.0.0.1:` |
+| `OIDC__ALLOWED_DOMAINS` | For any login | _(empty)_ | Comma-separated email-domain gate applied after Google sign-in |
+| `OIDC__GOOGLE__CLIENT_ID` | For any login | _(empty)_ | Upstream Google OAuth client |
+| `OIDC__GOOGLE__CLIENT_SECRET` | For any login | _(empty)_ | Upstream Google OAuth client secret |
+| `OIDC__CLIENT_SECRETS` | No | _(empty)_ | Comma-separated `id:secret`; promotes a registered client to confidential (PKCE carve-out) |
+| `HTTP__LISTENER` | No | `127.0.0.1:8000` | `host:port` for the public listener |
+| `STATE__SQLITE__PATH` | No | `/var/lib/tempogate/state.db` | SQLite state-store path (back this with a PVC) |
+| `LOG__LEVEL` | No | `info` | `debug` / `info` / `warn` / `error` |
+| `TEMPOGATE__ISSUER` | No | _(empty)_ | **Client-side**, read by `tempogate login` (not the server). Equivalent to `--issuer` |
 
-More keys (admin listener, JWKS storage, upstream Google client) arrive with their respective releases.
+## Why not a sidecar proxy or a fork?
 
-## Why not a sidecar proxy or a forked Temporal?
-
-| Approach                                   | Pros                                                              | Cons                                                                                                |
-| ------------------------------------------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| **tempogate (OIDC + OAuth2 AS, this repo)** | Stateless integration with stock Temporal. No fork, no proxy.     | A second component to operate.                                                                      |
-| Sidecar reverse-proxy in front of UI/gRPC | Auth logic outside Temporal.                                      | Has to demux gRPC + HTTP; brittle around streaming; obscures Temporal's own auth machinery.         |
-| Forked `temporal-server`                  | Total control.                                                    | Permanent rebase tax; loses Temporal upstream support; defeats "self-hosted but supported" posture. |
-
-Tempogate is the path Temporal's own docs already bless — it just hadn't been packaged.
+| Approach | Pros | Cons |
+| --- | --- | --- |
+| **tempogate (OIDC + OAuth2 AS, this repo)** | Stateless integration with stock Temporal. No fork, no proxy. | A second component to operate. |
+| Sidecar reverse-proxy in front of UI/gRPC | Auth logic outside Temporal. | Has to demux gRPC + HTTP; brittle around streaming; obscures Temporal's own auth machinery. |
+| Forked `temporal-server` | Total control. | Permanent rebase tax; loses upstream support; defeats the "self-hosted but supported" posture. |
 
 ## Development
 
 ```bash
 make tools         # install pinned gci + golangci-lint into ./.bin
-make check         # fmt + vet + gci; fails on dirty tree
+make check         # fmt + vet + gci; fails on a dirty tree
 make lint          # golangci-lint
 make test          # check + race + coverage
 make ci            # what GitHub Actions runs
@@ -127,22 +170,31 @@ make test-e2e      # container-backed acceptance proofs (needs Docker)
 ```
 
 `make test-e2e` stands up `temporalio/ui`, a JWKS-backed `temporal-frontend`,
-a mock Google IdP and headless Chrome via testcontainers and proves two flows
-end to end: the **Web UI SSO** login, and the **`tempogate login` CLI loopback**
-flow (the real binary, browser-driven consent, token persisted to
-`~/.tempogate/token.json`, then `tempogate token` refresh). Both assert the
-minted JWT authenticates a gRPC `ListNamespaces` and that an unauthenticated
-call is rejected. It is behind a `//go:build e2e` tag and a dedicated CI job,
-so the default `make ci` stays fast.
+a mock Google IdP, and headless Chrome via testcontainers, and proves two
+flows end to end: Web UI SSO login, and the `tempogate login` CLI loopback
+flow. Both assert that the minted JWT authenticates a gRPC `ListNamespaces`
+and that an unauthenticated call is rejected. It is behind a `//go:build e2e`
+tag and a dedicated CI job, so the default `make ci` stays fast.
 
-Go 1.26+ required. A dependency (`lestrrat-go/jwx/v4`) uses `encoding/json/v2`,
-so builds need `GOEXPERIMENT=jsonv2` — the `make` targets export it for you; set
-it yourself if you invoke `go build`/`go test` directly. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Go 1.26+ is required. A dependency (`lestrrat-go/jwx/v4`) uses
+`encoding/json/v2`, so builds need `GOEXPERIMENT=jsonv2`; the `make` targets
+export it for you. Set it yourself if you invoke `go build`/`go test`
+directly. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Documentation
+
+- [docs/cli-loopback-login.md](docs/cli-loopback-login.md) — the
+  `tempogate login` loopback flow, persistence, and auto-refresh
+- [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md)
+  — PKCE posture and the confidential-client carve-out
+- [charts/tempogate/README.md](charts/tempogate/README.md) — Helm deployment
 
 ## Security
 
-Report vulnerabilities via [GitHub Security Advisories](https://github.com/fenmoai/tempogate/security/advisories/new) — see [SECURITY.md](SECURITY.md). **Do not** open public issues for security reports.
+Report vulnerabilities via
+[GitHub Security Advisories](https://github.com/fenmoai/tempogate/security/advisories/new)
+— see [SECURITY.md](SECURITY.md). **Do not** open public issues for security
+reports.
 
 ## License
 

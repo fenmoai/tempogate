@@ -95,8 +95,7 @@ func (k *Keys) All() []Keypair {
 // If a keypair already exists and force is false, Generate returns
 // ErrKeypairExists (wrapped with the latest kid).
 // With force=true, a brand-new keypair is appended; old keypairs are
-// retained (rotation pattern; a future epic will introduce explicit
-// retirement).
+// retained (rotation pattern; explicit retirement will come later).
 func (k *Keys) Generate(ctx context.Context, force bool) (Keypair, error) {
 	existing, err := k.store.LoadKeypairs(ctx)
 	if err != nil {
