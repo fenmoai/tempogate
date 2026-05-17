@@ -1,8 +1,9 @@
 name: e2e
 
-# The container-backed Web UI SSO acceptance proof. Kept in its own workflow
-# (not folded into `ci`) so the fast unit job stays fast and an e2e failure is
-# isolated and independently visible. Builds the tempogate + mock-Google
+# The container-backed acceptance proofs: the Web UI SSO flow and the
+# `tempogate login` CLI loopback flow. Kept in its own workflow (not folded
+# into `ci`) so the fast unit job stays fast and an e2e failure is isolated
+# and independently visible. Builds the tempogate + mock-Google + cliclient
 # images and runs temporalio/ui, temporal-frontend, postgres and headless
 # Chrome via testcontainers.
 #
@@ -27,9 +28,9 @@ concurrency:
 
 jobs:
   e2e:
-    name: web-ui sso e2e
+    name: sso + cli loopback e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     # main: always. PRs: only when explicitly opted in with the e2e:true label.
     if: >-
       github.event_name == 'push' ||
@@ -44,5 +45,5 @@ jobs:
 
       # ubuntu-latest ships a working Docker daemon, which testcontainers
       # drives directly; no extra service container is needed.
-      - name: Run Web UI SSO e2e
+      - name: Run SSO + CLI loopback e2e
         run: make test-e2e

@@ -74,8 +74,9 @@ test-run: ## run tests with race + coverage (no check chain — CI-friendly)
 
 test: check test-run ## check + test-run
 
-# Container-backed acceptance proof (temporalio/ui + temporal-frontend + mock
-# Google + headless Chrome). Behind the `e2e` build tag and a dedicated CI job
+# Container-backed acceptance proofs: the Web UI SSO flow and the
+# `tempogate login` CLI loopback flow (temporalio/ui + temporal-frontend +
+# mock Google + headless Chrome). Behind the `e2e` build tag and a dedicated CI job
 # so `ci` stays fast; needs a working Docker daemon.
 #
 # The tempogate and mock-Google Dockerfiles use BuildKit-only syntax, but
@@ -84,12 +85,15 @@ test: check test-run ## check + test-run
 # via env; the test uses them as-is instead of building them itself.
 E2E_TEMPOGATE_IMAGE  ?= tempogate:e2e
 E2E_MOCKGOOGLE_IMAGE ?= tempogate-mockgoogle:e2e
+E2E_CLICLIENT_IMAGE  ?= tempogate-cliclient:e2e
 
-test-e2e: ## run the multi-container Web UI SSO end-to-end test
+test-e2e: ## run the multi-container Web UI SSO + CLI loopback end-to-end tests
 	DOCKER_BUILDKIT=1 docker build -t $(E2E_TEMPOGATE_IMAGE) -f Dockerfile .
 	DOCKER_BUILDKIT=1 docker build -t $(E2E_MOCKGOOGLE_IMAGE) -f test/e2e/mockgoogle/Dockerfile .
+	DOCKER_BUILDKIT=1 docker build -t $(E2E_CLICLIENT_IMAGE) -f test/e2e/cliclient/Dockerfile .
 	E2E_TEMPOGATE_IMAGE=$(E2E_TEMPOGATE_IMAGE) E2E_MOCKGOOGLE_IMAGE=$(E2E_MOCKGOOGLE_IMAGE) \
-		go test -tags e2e -timeout 25m -count=1 ./test/e2e/...
+	E2E_CLICLIENT_IMAGE=$(E2E_CLICLIENT_IMAGE) \
+		go test -tags e2e -timeout 40m -count=1 ./test/e2e/...
 
 ci: check lint test-run ## fmt/vet/imports + lint + tests (used by GitHub Actions)
 	@go tool cover -func=coverage.out | tail -1

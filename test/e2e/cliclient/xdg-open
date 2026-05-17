@@ -1,0 +1,11 @@
+#!/bin/sh
+# e2e shim for `tempogate login`'s default browser opener.
+#
+# On a real laptop xdg-open would launch the user's browser at the authorize
+# URL. This container is headless: instead, atomically publish the URL where
+# the test polls for it (the test then drives it with chromedp), and exit 0 so
+# `tempogate login` proceeds to wait for the loopback callback exactly as it
+# would after a real browser launch.
+set -eu
+printf '%s' "$1" > /tmp/tempogate-authurl.tmp
+mv /tmp/tempogate-authurl.tmp /tmp/tempogate-authurl
