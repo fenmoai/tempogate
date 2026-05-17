@@ -169,7 +169,7 @@ separator.
 
 | Env var | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `OIDC__ISSUER` | For real deploys | `http://127.0.0.1:8000` | Externally reachable base URL; advertised as `issuer` and used to derive `jwks_uri` |
+| `OIDC__ISSUER` | For real deploys | `http://127.0.0.1:8000` | Externally reachable base URL; advertised as `issuer` and used to derive `jwks_uri`. May include a path (e.g. `https://host/idp`) — see [Sub-path hosting](#sub-path-hosting) |
 | `OIDC__CLIENTS` | For any login | _(empty)_ | Comma-separated `id:redirect_uri_prefix` allowlist. Register the CLI as `tempogate-cli:http://127.0.0.1:` |
 | `OIDC__ALLOWED_DOMAINS` | For any login | _(empty)_ | Comma-separated email-domain gate applied after Google sign-in |
 | `OIDC__GOOGLE__CLIENT_ID` | For any login | _(empty)_ | Upstream Google OAuth client |
@@ -179,6 +179,35 @@ separator.
 | `STATE__SQLITE__PATH` | No | `/var/lib/tempogate/state.db` | SQLite state-store path (back this with a PVC) |
 | `LOG__LEVEL` | No | `info` | `debug` / `info` / `warn` / `error` |
 | `TEMPOGATE__ISSUER` | No | _(empty)_ | **Client-side**, read by `tempogate login` (not the server). Equivalent to `--issuer` |
+
+## Sub-path hosting
+
+`OIDC__ISSUER` may contain a path, so tempogate can share a hostname with
+another app instead of needing its own. Set the issuer to the full external
+URL including the path, e.g.:
+
+```
+OIDC__ISSUER=https://tempogate.example.com/idp
+```
+
+tempogate then serves its **entire OIDC surface under that prefix** —
+`/idp/.well-known/openid-configuration`, `/idp/.well-known/jwks.json`,
+`/idp/authorize`, `/idp/token`, `/idp/userinfo`, `/idp/callback/google` — and
+the discovery document advertises issuer-relative (prefixed) endpoints, so the
+`iss` claim, the advertised endpoints, and the served routes stay in lockstep.
+A root issuer (no path) behaves exactly as before.
+
+Route a path prefix on the shared host to tempogate at your reverse proxy
+(strip nothing — tempogate owns the prefix natively). Two operational notes:
+
+- **Health probes stay at the root**: `/healthz` and `/readyz` are *not*
+  moved under the prefix (they are infra probes, not part of the public OIDC
+  surface). Point Kubernetes liveness/readiness at `/healthz` / `/readyz`
+  regardless of the issuer path; you do not need to route them through the
+  shared-host proxy.
+- **Google authorized redirect URI** must match the prefixed callback:
+  register `https://tempogate.example.com/idp/callback/google` (issuer +
+  `/callback/google`) in the Google OAuth client.
 
 ## Why not a sidecar proxy or a fork?
 

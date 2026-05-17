@@ -58,12 +58,13 @@ func newServeCmd(p serveParams) *cobra.Command {
 				return fmt.Errorf("keys init: %w", err)
 			}
 
+			// p.API.Handler already serves every route at its final path:
+			// health at the root, and the OIDC surface natively under the
+			// configured base path. Mount it as-is — a StripPrefix here would
+			// desync the served paths from the advertised endpoints / iss
+			// claim and silently break token validation.
 			mux := http.NewServeMux()
-			if p.API.Prefix == "" {
-				mux.Handle("/", p.API.Handler)
-			} else {
-				mux.Handle(p.API.Prefix+"/", http.StripPrefix(p.API.Prefix, p.API.Handler))
-			}
+			mux.Handle("/", p.API.Handler)
 
 			addr := p.Listener.String()
 			logger := p.Logger.Named("server")

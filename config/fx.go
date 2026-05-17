@@ -21,6 +21,7 @@ type Result struct {
 	SqliteMaxConns      int                `name:"sqlite_max_conns"`
 	SqliteBusyTimeout   time.Duration      `name:"sqlite_busy_timeout"`
 	OIDCIssuer          string             `name:"oidc_issuer"`
+	OIDCBasePath        string             `name:"oidc_base_path"`
 	OIDCClients         string             `name:"oidc_clients"`
 	OIDCClientSecrets   string             `name:"oidc_client_secrets"`
 	OIDCAllowedDomains  string             `name:"oidc_allowed_domains"`
@@ -42,6 +43,7 @@ func Fx() fx.Option {
 				SqliteMaxConns:      cfg.State.Sqlite.MaxConns,
 				SqliteBusyTimeout:   cfg.State.Sqlite.BusyTimeout,
 				OIDCIssuer:          cfg.OIDC.Issuer,
+				OIDCBasePath:        issuerBasePath(cfg.OIDC.Issuer),
 				OIDCClients:         cfg.OIDC.Clients,
 				OIDCClientSecrets:   cfg.OIDC.ClientSecrets,
 				OIDCAllowedDomains:  cfg.OIDC.AllowedDomains,

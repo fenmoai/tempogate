@@ -10,9 +10,10 @@ import (
 type resultParams struct {
 	fx.In
 
-	Readiness  *Readiness
-	Keys       JWKSSource
-	OIDCIssuer string `name:"oidc_issuer"`
+	Readiness    *Readiness
+	Keys         JWKSSource
+	OIDCIssuer   string `name:"oidc_issuer"`
+	OIDCBasePath string `name:"oidc_base_path"`
 
 	// Registrars are contributed by feature packages (e.g. oidc) into the
 	// shared group so they can append Huma operations without api importing
@@ -21,7 +22,10 @@ type resultParams struct {
 }
 
 func newResult(p resultParams) *Result {
-	opts := []Option{WithWellKnown(p.Keys, p.OIDCIssuer)}
+	opts := []Option{
+		WithBasePath(p.OIDCBasePath),
+		WithWellKnown(p.Keys, p.OIDCIssuer),
+	}
 	for _, r := range p.Registrars {
 		opts = append(opts, WithRegistrar(r))
 	}

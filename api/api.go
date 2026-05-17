@@ -1,6 +1,10 @@
-// Package api is the public HTTP surface. Today it serves only /healthz and
-// /readyz under no prefix; OIDC, JWKS, and admin endpoints land in later
-// modules by appending huma operations to the same Result.API.
+// Package api is the public HTTP surface: /healthz, /readyz, and (via feature
+// registrars) the OIDC/JWKS endpoints.
+//
+// By default everything is served at the root. With WithBasePath set (the path
+// component of OIDC__ISSUER), the OIDC surface is mounted under that prefix so
+// tempogate can be co-hosted on a shared hostname; /healthz and /readyz stay
+// at the root regardless — they are k8s-probe-only and never path-routed.
 package api
 
 import (
@@ -12,18 +16,24 @@ import (
 	"github.com/fenmoai/tempogate/buildinfo"
 )
 
-const apiPrefix = ""
-
 type apiConfig struct {
 	registrars []func(huma.API)
+	basePath   string
 }
 
 type Option func(*apiConfig)
 
-// WithRegistrar lets future modules (OIDC, admin, JWKS) plug additional Huma
-// route registrations into the same humago adapter.
+// WithRegistrar lets feature modules (OIDC, admin, JWKS) plug additional Huma
+// route registrations onto the OIDC-surface adapter.
 func WithRegistrar(fn func(huma.API)) Option {
 	return func(c *apiConfig) { c.registrars = append(c.registrars, fn) }
+}
+
+// WithBasePath mounts the OIDC surface under a URL path prefix — the path
+// component of OIDC__ISSUER (e.g. "/idp"). Health probes stay at the root.
+// Empty ⇒ root, the historical default (zero behavioural change).
+func WithBasePath(p string) Option {
+	return func(c *apiConfig) { c.basePath = p }
 }
 
 type Result struct {
@@ -39,16 +49,34 @@ func New(readiness *Readiness, opts ...Option) *Result {
 	}
 
 	mux := http.NewServeMux()
-	api := humago.NewWithPrefix(mux, apiPrefix, huma.DefaultConfig("tempogate", buildinfo.Version()))
 
-	registerHealth(api, readiness)
+	// Root mode: one adapter, health + OIDC at the root. Byte-identical to
+	// the original behaviour for every deployment that doesn't set a path.
+	if cfg.basePath == "" {
+		a := humago.NewWithPrefix(mux, "", huma.DefaultConfig("tempogate", buildinfo.Version()))
+		registerHealth(a, readiness)
+		for _, fn := range cfg.registrars {
+			fn(a)
+		}
+		return &Result{API: a, Handler: mux, Prefix: ""}
+	}
+
+	// Base-path mode: two adapters on one mux. Health stays at the root
+	// (probe-only); the OIDC surface mounts natively under basePath so the
+	// served routes, the discovery document, and the iss claim stay in
+	// lockstep with no proxy StripPrefix. The health adapter serves no
+	// OpenAPI/docs so the root surface is exactly /healthz + /readyz.
+	healthCfg := huma.DefaultConfig("tempogate", buildinfo.Version())
+	healthCfg.OpenAPIPath = ""
+	healthCfg.DocsPath = ""
+	healthCfg.SchemasPath = ""
+	healthAPI := humago.NewWithPrefix(mux, "", healthCfg)
+	registerHealth(healthAPI, readiness)
+
+	oidcAPI := humago.NewWithPrefix(mux, cfg.basePath, huma.DefaultConfig("tempogate", buildinfo.Version()))
 	for _, fn := range cfg.registrars {
-		fn(api)
+		fn(oidcAPI)
 	}
 
-	return &Result{
-		API:     api,
-		Handler: mux,
-		Prefix:  apiPrefix,
-	}
+	return &Result{API: oidcAPI, Handler: mux, Prefix: cfg.basePath}
 }
