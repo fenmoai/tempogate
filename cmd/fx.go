@@ -2,36 +2,41 @@ package cmd
 
 import (
 	"context"
+	"sort"
 
-	xloadtype "github.com/gojekfarm/xtools/xload/type"
 	"github.com/spf13/cobra"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
-
-	"github.com/fenmoai/tempogate/api"
-	"github.com/fenmoai/tempogate/keys"
-	"github.com/fenmoai/tempogate/state/sqlite"
 )
 
+// Fx wires the cobra root dispatcher. Subcommands are not referenced here:
+// each is contributed into the "commands" value group by its own provider —
+// the always-present CLI ones via CLICommandsFx, the server-bound ones
+// (serve/migrate/keys) via cmd/servercmd, which the lean build never wires.
+// This package therefore imports nothing server-specific, which is what lets
+// the lean binary drop the SQLite/OIDC/API subtree.
 func Fx() fx.Option { return fx.Invoke(Run) }
 
-// RunParams collects everything cobra subcommands need from the fx graph.
-// New deps go here as new subcommands land.
-type RunParams struct {
+// rootParams is everything the dispatcher itself needs. Subcommand
+// dependencies live in each subcommand's own provider, not here.
+type rootParams struct {
 	fx.In
 
 	Lifecycle  fx.Lifecycle
 	Shutdowner fx.Shutdowner
 	Logger     *zap.Logger
 
-	Listener  xloadtype.Listener `name:"http"`
-	API       *api.Result
-	Readiness *api.Readiness
+	Commands []*cobra.Command `group:"commands"`
+}
 
-	Store      *sqlite.Store
-	SqlitePath string `name:"sqlite_path"`
-
-	Keys *keys.Keys
+// rootCommand assembles the cobra tree from whatever subcommands the graph
+// contributed. Split out of Run so the wiring is unit-testable without
+// standing up the fx lifecycle. Commands are sorted by name for a stable
+// `--help` ordering regardless of fx group resolution order.
+func rootCommand(p rootParams) *cobra.Command {
+	cmds := append([]*cobra.Command(nil), p.Commands...)
+	sort.Slice(cmds, func(i, j int) bool { return cmds[i].Name() < cmds[j].Name() })
+	return NewRootCmd(cmds...)
 }
 
 // Run is the cobra dispatcher fx invokes after the graph builds.
@@ -40,20 +45,7 @@ type RunParams struct {
 // ctx is cancelled on OnStop so long-running subcommands (serve) that block
 // on ctx can unwind gracefully. One-shot subcommands (version, migrate)
 // finish immediately and trigger Shutdowner themselves.
-// rootCommand assembles the cobra command tree from the fx graph. It is split
-// out of Run so the wiring — which subcommands exist — is unit-testable
-// without standing up the fx lifecycle.
-func rootCommand(p RunParams) *cobra.Command {
-	return NewRootCmd(
-		WithSubcommand(newServeCmd(p)),
-		WithSubcommand(newMigrateCmd(p)),
-		WithSubcommand(newKeysCmd(p)),
-		WithSubcommand(newLoginCmd(p)),
-		WithSubcommand(newTokenCmd(p)),
-	)
-}
-
-func Run(p RunParams) {
+func Run(p rootParams) {
 	ctx, cancel := context.WithCancel(context.Background())
 	rootCmd := rootCommand(p)
 	done := make(chan struct{})

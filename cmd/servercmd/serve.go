@@ -1,4 +1,12 @@
-package cmd
+// Package servercmd holds the server-bound subcommands (serve, migrate,
+// keys) — the ones that need the SQLite state store and the OIDC/API stack.
+//
+// It is wired into the cobra command group only by the full app assembly
+// (app/modules_full.go). The lean CLI build never imports this package, so
+// the Go linker drops the entire server subtree (SQLite/libc/OIDC/API) from
+// that binary. Build tags live exclusively in package app — leanness here is
+// a property of not being imported, not of a //go:build constraint.
+package servercmd
 
 import (
 	"fmt"
@@ -6,13 +14,30 @@ import (
 	"time"
 
 	"github.com/gojekfarm/xrun"
+	xloadtype "github.com/gojekfarm/xtools/xload/type"
 	"github.com/spf13/cobra"
+	"go.uber.org/fx"
 	"go.uber.org/zap"
+
+	"github.com/fenmoai/tempogate/api"
+	"github.com/fenmoai/tempogate/keys"
+	"github.com/fenmoai/tempogate/state/sqlite"
 )
 
 const readHeaderTimeout = 10 * time.Second
 
-func newServeCmd(p RunParams) *cobra.Command {
+type serveParams struct {
+	fx.In
+
+	Logger    *zap.Logger
+	Store     *sqlite.Store
+	Keys      *keys.Keys
+	API       *api.Result
+	Readiness *api.Readiness
+	Listener  xloadtype.Listener `name:"http"`
+}
+
+func newServeCmd(p serveParams) *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
 		Short: "Run the tempogate HTTP server",

@@ -1,0 +1,113 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+#
+# Lean CLI binaries only. The multi-arch GHCR container image is built
+# separately by the buildx job in .github/workflows/release.yml — there is
+# intentionally no `dockers:` block here.
+#
+# Built with -tags lean: the distributed CLI carries only login/token/version
+# and none of the SQLite/libc/OIDC/API server subtree (~5 MB smaller, reduced
+# attack surface). modernc.org/sqlite is dropped entirely, so CGO is off and
+# we cross-compile natively. github.com/lestrrat-go/jwx/v4 imports
+# encoding/json/v2, gated behind GOEXPERIMENT=jsonv2 — set on every build.
+version: 2
+
+project_name: tempogate
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: tempogate
+    binary: tempogate
+    main: .
+    env:
+      - CGO_ENABLED=0
+      - GOEXPERIMENT=jsonv2
+    flags:
+      - -trimpath
+      - -tags=lean
+    ldflags:
+      - -s -w
+      - -X 'github.com/fenmoai/tempogate/buildinfo.version={{ .Version }}'
+      - -X 'github.com/fenmoai/tempogate/buildinfo.gitTag={{ .Tag }}'
+      - -X 'github.com/fenmoai/tempogate/buildinfo.gitCommit={{ .FullCommit }}'
+      - -X 'github.com/fenmoai/tempogate/buildinfo.buildDate={{ .Date }}'
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: tempogate
+    ids: [tempogate]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+homebrew_casks:
+  - name: tempogate
+    binaries: [tempogate]
+    # In-repo tap: the cask lives in fenmoai/tempogate itself (Casks/), so the
+    # default workflow GITHUB_TOKEN can push it — no second repo, no PAT.
+    repository:
+      owner: fenmoai
+      name: tempogate
+      branch: main
+      token: '{{ .Env.GITHUB_TOKEN }}'
+      # If main is branch-protected against direct pushes, switch to PR mode:
+      # pull_request:
+      #   enabled: true
+      #   base:
+      #     branch: main
+    directory: Casks
+    homepage: 'https://github.com/fenmoai/tempogate'
+    description: 'OIDC provider & OAuth2 authorization server for self-hosted Temporal — CLI'
+    license: 'Apache-2.0'
+    # Only stable vX.Y.Z commits the cask; rc & snapshot builds are skipped.
+    skip_upload: auto
+    # Unsigned binary: strip the Gatekeeper quarantine xattr so `tempogate`
+    # runs without a security prompt. Interim until macOS notarization.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+                           args: ["-dr", "com.apple.quarantine", "#{staged_path}/tempogate"]
+          end
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-SNAPSHOT-{{ .ShortCommit }}'
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - 'Merge pull request'
+      - 'Merge branch'
+
+release:
+  github:
+    owner: fenmoai
+    name: tempogate
+  # vX.Y.Z-rc.N (any pre-release tag) is auto-marked as a GitHub pre-release;
+  # vX.Y.Z publishes a full release.
+  prerelease: auto
+  name_template: '{{ .ProjectName }} {{ .Tag }}'
+  draft: false

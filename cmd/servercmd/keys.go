@@ -1,13 +1,24 @@
-package cmd
+package servercmd
 
 import (
 	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.uber.org/fx"
+
+	"github.com/fenmoai/tempogate/keys"
+	"github.com/fenmoai/tempogate/state/sqlite"
 )
 
-func newKeysCmd(p RunParams) *cobra.Command {
+type keysParams struct {
+	fx.In
+
+	Store *sqlite.Store
+	Keys  *keys.Keys
+}
+
+func newKeysCmd(p keysParams) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "keys",
 		Short: "Manage tempogate signing keys",
@@ -16,7 +27,7 @@ func newKeysCmd(p RunParams) *cobra.Command {
 	return root
 }
 
-func newKeysGenerateCmd(p RunParams) *cobra.Command {
+func newKeysGenerateCmd(p keysParams) *cobra.Command {
 	var force bool
 	c := &cobra.Command{
 		Use:   "generate",

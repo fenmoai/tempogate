@@ -44,7 +44,7 @@ func (s *LoginCmdSuite) TestDefaultRunnerDelegatesToFlow() {
 func (s *LoginCmdSuite) TestRequiresIssuer() {
 	s.T().Setenv("TEMPOGATE__ISSUER", "")
 
-	cmd := newLoginCmd(RunParams{Logger: zap.NewNop()})
+	cmd := newLoginCmd(zap.NewNop())
 	cmd.SetOut(new(testWriter))
 	cmd.SetErr(new(testWriter))
 
@@ -63,7 +63,7 @@ func (s *LoginCmdSuite) TestEnvIssuerPrintsTokenAndPersists() {
 	path := filepath.Join(s.T().TempDir(), "nested", "token.json")
 
 	var out, errOut bytes.Buffer
-	cmd := newLoginCmd(RunParams{Logger: zap.NewNop()})
+	cmd := newLoginCmd(zap.NewNop())
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 	cmd.SetArgs([]string{"--token-file", path})
@@ -87,7 +87,7 @@ func (s *LoginCmdSuite) TestTokenPersistenceFailurePropagates() {
 	notADir := filepath.Join(s.T().TempDir(), "afile")
 	s.Require().NoError(os.WriteFile(notADir, []byte("x"), 0o600))
 
-	cmd := newLoginCmd(RunParams{Logger: zap.NewNop()})
+	cmd := newLoginCmd(zap.NewNop())
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	var out bytes.Buffer
@@ -106,7 +106,7 @@ func (s *LoginCmdSuite) TestTokenPathResolutionFailurePropagates() {
 	s.T().Setenv("HOME", "")
 	s.T().Setenv("USERPROFILE", "")
 
-	cmd := newLoginCmd(RunParams{Logger: zap.NewNop()})
+	cmd := newLoginCmd(zap.NewNop())
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	cmd.SetOut(new(testWriter))
@@ -125,7 +125,7 @@ func (s *LoginCmdSuite) TestFlagIssuerOverridesEnvAndErrorsPropagate() {
 	}
 
 	var out, errOut bytes.Buffer
-	cmd := newLoginCmd(RunParams{Logger: zap.NewNop()})
+	cmd := newLoginCmd(zap.NewNop())
 	// Mirror production, where login runs under NewRootCmd (SilenceUsage/
 	// SilenceErrors), so an error does not spray usage onto stdout.
 	cmd.SilenceUsage = true

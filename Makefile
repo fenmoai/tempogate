@@ -26,7 +26,7 @@ LDFLAGS := -s -w \
 	-X '$(BUILDINFO).gitCommit=$(GIT_COMMIT)' \
 	-X '$(BUILDINFO).buildDate=$(BUILD_DATE)'
 
-.PHONY: start build fmt vet lint imports imports-check check tidy test test-run test-e2e test-e2e-images test-e2e-go ci gen-oas clean help tools \
+.PHONY: start build build-cli fmt vet lint imports imports-check check tidy test test-run test-e2e test-e2e-images test-e2e-go ci gen-oas clean help tools \
         gci golangci-lint
 
 start: ## Run the binary directly with build-info ldflags injected
@@ -35,6 +35,10 @@ start: ## Run the binary directly with build-info ldflags injected
 build: ## Build distroless-bound binary into $(BIN_DIR)
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) .
+
+build-cli: ## Build the lean CLI (-tags lean: login/token/version only, no server subtree)
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -tags lean -ldflags "$(LDFLAGS)" -o $(BIN)-cli .
 
 fmt: ## go fmt
 	go fmt ./...

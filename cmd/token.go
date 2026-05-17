@@ -18,7 +18,7 @@ var tokenRefresher = func(ctx context.Context, path, issuer string) (cli.Token, 
 	return cli.EnsureFresh(ctx, path, issuer)
 }
 
-func newTokenCmd(p RunParams) *cobra.Command {
+func newTokenCmd(logger *zap.Logger) *cobra.Command {
 	var issuer, tokenFile string
 
 	c := &cobra.Command{
@@ -43,7 +43,7 @@ func newTokenCmd(p RunParams) *cobra.Command {
 
 			// Debug, not Info: `tempogate token` is meant for shell
 			// substitution, so it stays quiet at the default log level.
-			p.Logger.Named("token").Debug("resolving token",
+			logger.Named("token").Debug("resolving token",
 				zap.String("issuer", issuer), zap.String("path", path))
 
 			tok, err := tokenRefresher(cmd.Context(), path, issuer)

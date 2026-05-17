@@ -1,4 +1,4 @@
-package cmd
+package servercmd
 
 import (
 	"bytes"
@@ -42,8 +42,8 @@ func (s *MigrateCmdSuite) TearDownTest() {
 	}
 }
 
-func (s *MigrateCmdSuite) params() RunParams {
-	return RunParams{
+func (s *MigrateCmdSuite) params() migrateParams {
+	return migrateParams{
 		Logger:     zap.NewNop(),
 		Store:      s.store,
 		SqlitePath: s.path,

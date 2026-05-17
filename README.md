@@ -84,11 +84,41 @@ docker run --rm -p 8000:8000 ghcr.io/fenmoai/tempogate:latest
 curl http://127.0.0.1:8000/healthz
 ```
 
+Container images are published to `ghcr.io/fenmoai/tempogate`:
+
 | Tag | Meaning |
 | --- | --- |
 | `:vX.Y.Z`, `:X.Y`, `:X`, `:latest` | Stable releases (pushed on `git tag vX.Y.Z`) |
-| `:vX.Y.Z-rc.N` | Pre-releases |
+| `:vX.Y.Z-rc.N` | Pre-releases (release candidates) |
 | `:sha-<short>` | One-off builds dispatched manually from a specific commit |
+
+### Prebuilt CLI binaries
+
+Every stable release and release candidate also ships a standalone, **lean**
+`tempogate` CLI — just `login`, `token`, and `version`, with none of the
+server/SQLite/OIDC-issuer stack compiled in — as GitHub Release assets for
+`linux` and `darwin` on `amd64`/`arm64`, alongside a `checksums.txt`. Stable
+releases are published; release candidates are marked pre-release; manual
+dispatch builds attach the binaries to the workflow run only.
+
+On macOS, via the Homebrew tap (hosted in this repository):
+
+```bash
+brew tap fenmoai/tempogate https://github.com/fenmoai/tempogate
+brew install tempogate
+```
+
+Or download a release asset directly (Linux x86_64 shown — pick your os/arch):
+
+```bash
+gh release download vX.Y.Z --repo fenmoai/tempogate \
+  --pattern 'tempogate_*_linux_x86_64.tar.gz' --pattern checksums.txt
+sha256sum -c --ignore-missing checksums.txt
+tar -xzf tempogate_*_linux_x86_64.tar.gz
+./tempogate version --detailed
+```
+
+Cutting a release? See [RELEASING.md](RELEASING.md).
 
 Build from source:
 

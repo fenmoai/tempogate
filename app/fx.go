@@ -9,14 +9,9 @@ import (
 	"go.uber.org/fx/fxevent"
 	"go.uber.org/zap"
 
-	"github.com/fenmoai/tempogate/api"
 	"github.com/fenmoai/tempogate/cmd"
 	"github.com/fenmoai/tempogate/config"
-	"github.com/fenmoai/tempogate/keys"
 	"github.com/fenmoai/tempogate/log"
-	"github.com/fenmoai/tempogate/oidc"
-	"github.com/fenmoai/tempogate/oidc/google"
-	"github.com/fenmoai/tempogate/state/sqlite"
 )
 
 type appConfig struct {
@@ -42,12 +37,13 @@ func New(opts ...Option) fx.Option {
 		fx.WithLogger(func(l *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: l.WithOptions(zap.IncreaseLevel(zap.WarnLevel))}
 		}),
-		sqlite.Fx(),
-		keys.Fx(),
-		oidc.Fx(),
-		google.Fx(),
-		api.Fx(),
 		cmd.Fx(),
+		cmd.CLICommandsFx(),
 	}
+	// serverModules is the build-tag seam: the full build (modules_full.go)
+	// returns the SQLite/OIDC/API stack plus the serve/migrate/keys
+	// subcommands; the lean CLI build (modules_lean.go) returns nil. These two
+	// files are the ONLY place a //go:build constraint appears in tempogate.
+	base = append(base, serverModules()...)
 	return fx.Options(append(base, cfg.extra...)...)
 }
