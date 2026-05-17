@@ -4,34 +4,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type rootConfig struct {
-	subcommands []*cobra.Command
-}
-
-type Option func(*rootConfig)
-
-// WithSubcommand registers an additional cobra subcommand on the root.
-// Bootstrap subcommands (version) are always registered; this hook is for
-// future packages (serve, login, keys, migrate) to add their own.
-func WithSubcommand(c *cobra.Command) Option {
-	return func(cfg *rootConfig) { cfg.subcommands = append(cfg.subcommands, c) }
-}
-
-func NewRootCmd(opts ...Option) *cobra.Command {
-	cfg := &rootConfig{}
-	for _, o := range opts {
-		o(cfg)
-	}
-
+// NewRootCmd assembles the tempogate cobra tree from the given subcommands.
+// Which subcommands exist is decided by the fx graph (see CLICommandsFx and
+// the build-tagged module assembly in package app), not hardcoded here, so a
+// lean build that omits the server modules simply has fewer subcommands —
+// no //go:build constraint leaks into this package.
+func NewRootCmd(subcommands ...*cobra.Command) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:           "tempogate",
 		Short:         "OIDC + OAuth2 authorization server for self-hosted Temporal",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-
-	rootCmd.AddCommand(newVersionCmd())
-	for _, sc := range cfg.subcommands {
+	for _, sc := range subcommands {
 		rootCmd.AddCommand(sc)
 	}
 	return rootCmd

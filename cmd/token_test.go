@@ -43,7 +43,7 @@ func (s *TokenCmdSuite) TestDefaultRefresherDelegatesToEnsureFresh() {
 func (s *TokenCmdSuite) TestRequiresIssuer() {
 	s.T().Setenv("TEMPOGATE__ISSUER", "")
 
-	cmd := newTokenCmd(RunParams{Logger: zap.NewNop()})
+	cmd := newTokenCmd(zap.NewNop())
 	cmd.SetOut(new(testWriter))
 	cmd.SetErr(new(testWriter))
 
@@ -60,7 +60,7 @@ func (s *TokenCmdSuite) TestPrintsAccessTokenOnly() {
 	}
 
 	var out, errOut bytes.Buffer
-	cmd := newTokenCmd(RunParams{Logger: zap.NewNop()})
+	cmd := newTokenCmd(zap.NewNop())
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 	cmd.SetArgs([]string{})
@@ -74,7 +74,7 @@ func (s *TokenCmdSuite) TestTokenPathResolutionFailurePropagates() {
 	s.T().Setenv("HOME", "")
 	s.T().Setenv("USERPROFILE", "")
 
-	cmd := newTokenCmd(RunParams{Logger: zap.NewNop()})
+	cmd := newTokenCmd(zap.NewNop())
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	cmd.SetOut(new(testWriter))
@@ -93,7 +93,7 @@ func (s *TokenCmdSuite) TestRefreshErrorPropagates() {
 	}
 
 	var out, errOut bytes.Buffer
-	cmd := newTokenCmd(RunParams{Logger: zap.NewNop()})
+	cmd := newTokenCmd(zap.NewNop())
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	cmd.SetOut(&out)

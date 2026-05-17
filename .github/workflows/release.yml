@@ -86,3 +86,61 @@ jobs:
             BUILD_DATE=${{ github.event.repository.updated_at }}
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
           cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+
+  binaries:
+    name: goreleaser (cli binaries)
+    runs-on: ubuntu-latest
+    # Overrides the workflow-level `contents: read`: GoReleaser needs to create
+    # the GitHub Release, upload assets, and commit the regenerated
+    # Casks/tempogate.rb back to this repo's main (in-repo Homebrew tap).
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0   # GoReleaser needs full history + tags
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Tag push (vX.Y.Z / vX.Y.Z-rc.N): publish a GitHub Release with the lean
+      # multi-arch CLI binaries + checksums. `prerelease: auto` marks rc tags.
+      # On stable tags GoReleaser also commits the refreshed cask to main.
+      - name: GoReleaser (release on tag push)
+        if: github.event_name == 'push'
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GOEXPERIMENT: jsonv2
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+
+      # workflow_dispatch (dev/SHA build): build the same lean matrix as a
+      # snapshot — no GitHub Release, no cask upload (skip_upload: auto).
+      - name: GoReleaser (snapshot on dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean
+        env:
+          GOEXPERIMENT: jsonv2
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload snapshot binaries
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: tempogate-snapshot-${{ github.sha }}
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+          retention-days: 14

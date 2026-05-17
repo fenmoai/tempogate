@@ -35,7 +35,7 @@ func resolveTokenPath(explicit string) (string, error) {
 	return cli.DefaultTokenPath()
 }
 
-func newLoginCmd(p RunParams) *cobra.Command {
+func newLoginCmd(logger *zap.Logger) *cobra.Command {
 	var issuer, clientID, tokenFile string
 	var port int
 
@@ -62,8 +62,8 @@ func newLoginCmd(p RunParams) *cobra.Command {
 				return err
 			}
 
-			logger := p.Logger.Named("login")
-			logger.Info("starting loopback login", zap.String("issuer", issuer))
+			log := logger.Named("login")
+			log.Info("starting loopback login", zap.String("issuer", issuer))
 
 			tok, err := loginRunner(cmd.Context(),
 				cli.WithIssuer(issuer),

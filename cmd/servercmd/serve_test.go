@@ -1,4 +1,4 @@
-package cmd
+package servercmd
 
 import (
 	"context"
@@ -40,7 +40,7 @@ func (s *ServeCmdSuite) TearDownTest() {
 }
 
 func (s *ServeCmdSuite) TestRejectsStaleSchema() {
-	cmd := newServeCmd(RunParams{
+	cmd := newServeCmd(serveParams{
 		Logger: zap.NewNop(),
 		Store:  s.store,
 	})
@@ -56,7 +56,7 @@ func (s *ServeCmdSuite) TestRejectsStaleSchema() {
 func (s *ServeCmdSuite) TestRejectsUnreachableStore() {
 	s.Require().NoError(s.store.Close())
 
-	cmd := newServeCmd(RunParams{
+	cmd := newServeCmd(serveParams{
 		Logger: zap.NewNop(),
 		Store:  s.store,
 	})
@@ -69,7 +69,3 @@ func (s *ServeCmdSuite) TestRejectsUnreachableStore() {
 
 	s.store = nil
 }
-
-type testWriter struct{}
-
-func (testWriter) Write(p []byte) (int, error) { return len(p), nil }
