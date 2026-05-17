@@ -450,7 +450,7 @@ func (s *TokenSuite) TestAuthorizationCodeGrantMintsVerifiableJWT() {
 
 	perms, ok := tok.Field("permissions")
 	s.Require().True(ok)
-	s.Equal([]string{"*:admin"}, toStringSlice(s.T(), perms))
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), perms))
 
 	exp, ok := tok.Expiration()
 	s.Require().True(ok)
@@ -602,7 +602,7 @@ func (s *TokenSuite) TestRefreshTokenGrantRotatesAndMintsSamePermissions() {
 	s.Require().NoError(err)
 	perms, ok := tok.Field("permissions")
 	s.Require().True(ok)
-	s.Equal([]string{"*:admin"}, toStringSlice(s.T(), perms))
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), perms))
 	sub, _ := tok.Subject()
 	s.Equal("alice@example.com", sub)
 

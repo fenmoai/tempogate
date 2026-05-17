@@ -339,12 +339,16 @@ func (t *Token) issue(ctx context.Context, email, clientID, nonce string) (*toke
 }
 
 // flatAdminPermissions is the Hour-0 authorization model: every admitted
-// identity gets unconditional access across all namespaces. Group- or
-// role-derived grants will replace this once the shared permissions model
-// lands; until then the Temporal-formatted claim is constructed inline rather
-// than through that (not-yet-existing) package.
+// identity gets unconditional access. The value is dictated by Temporal's
+// default JWT ClaimMapper, which has no namespace wildcard: it grants
+// cluster-level and all-namespace access only via the System role, set by a
+// permission whose namespace part is exactly the system namespace
+// ("temporal-system"). A literal "*" would be treated as an ordinary
+// namespace named "*" and would NOT authorize cluster APIs (ListNamespaces,
+// cluster-info) or any real namespace. Group- or role-derived grants will
+// replace this once the shared permissions model lands.
 func flatAdminPermissions() []string {
-	return []string{"*:admin"}
+	return []string{"temporal-system:admin"}
 }
 
 // verifyPKCE checks the RFC 7636 S256 binding: BASE64URL(SHA256(verifier))

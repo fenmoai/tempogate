@@ -198,7 +198,7 @@ func (s *TokenE2ESuite) TestFullFlowMintsJWTVerifiableAgainstPublishedJWKS() {
 
 	perms, ok := tok.Field("permissions")
 	s.Require().True(ok)
-	s.Equal([]string{"*:admin"}, toStringSlice(s.T(), perms))
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), perms))
 
 	exp, ok := tok.Expiration()
 	s.Require().True(ok)
@@ -245,7 +245,7 @@ func (s *TokenE2ESuite) TestFullFlowMintsJWTVerifiableAgainstPublishedJWKS() {
 	s.Require().NoError(err)
 	rPerms, ok := rTok.Field("permissions")
 	s.Require().True(ok)
-	s.Equal([]string{"*:admin"}, toStringSlice(s.T(), rPerms))
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), rPerms))
 }
 
 func (s *TokenE2ESuite) TestConsumedCodeCannotBeReplayed() {
@@ -352,7 +352,7 @@ func (s *TokenE2ESuite) TestConfidentialNoPKCEFlowMintsNonceAudJWT() {
 
 	perms, ok := tok.Field("permissions")
 	s.Require().True(ok)
-	s.Equal([]string{"*:admin"}, toStringSlice(s.T(), perms))
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), perms))
 
 	// A wrong secret on the same flow is rejected as invalid_client.
 	code2 := s.runConfidentialFlow(nonce)
