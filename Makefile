@@ -50,7 +50,9 @@ lint: golangci-lint ## golangci-lint run
 	$(GOLANGCI_LINT) run ./...
 
 imports: gci ## gci write with std/default/local groupings
-	$(GCI) write --skip-generated -s standard -s default -s "prefix($(PKG))" .
+	# gci also reads stdin; redirect from /dev/null so it never blocks
+	# locally on a TTY nor logs a spurious EOF parse error under CI stdin.
+	$(GCI) write --skip-generated -s standard -s default -s "prefix($(PKG))" . </dev/null
 
 GO_SRC = $(shell find . -name '*.go' -not -path './.bin/*')
 
@@ -63,7 +65,7 @@ check: vet imports-check ## vet + assert gofmt/gci would not rewrite any .go fil
 	fi
 
 imports-check: gci ## assert gci import grouping is already applied
-	@d=$$($(GCI) diff --skip-generated -s standard -s default -s "prefix($(PKG))" .); \
+	@d=$$($(GCI) diff --skip-generated -s standard -s default -s "prefix($(PKG))" . </dev/null); \
 	if [ -n "$$d" ]; then \
 		echo "check: import grouping is off — run 'make imports':"; \
 		echo "$$d"; \
