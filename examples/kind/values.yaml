@@ -1,0 +1,37 @@
+# Helm values overlay for a local kind / k3d cluster.
+#
+#   kind create cluster
+#   helm install tempogate ./charts/tempogate --values examples/kind/values.yaml
+#   kubectl rollout status deploy/tempogate
+#   kubectl port-forward svc/tempogate 8000:8000 &
+#   curl -fsS http://127.0.0.1:8000/healthz
+#
+# This overlay only proves the server boots, migrates, and serves /healthz.
+# Wiring real Google SSO + a Temporal stack is covered by the docker-compose
+# example and docs/getting-started.md.
+
+# Smaller footprint for a laptop cluster.
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# Use the cluster's default StorageClass (kind ships `standard`, a
+# local-path provisioner). 1Gi is plenty for the SQLite state store.
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+
+log:
+  level: debug
+
+# Reachable over `kubectl port-forward` on the host. Replace with your real
+# external URL when fronting this with an Ingress.
+oidc:
+  issuer: http://127.0.0.1:8000
+
+# auth.* is intentionally left at defaults here — no upstream Google client
+# is configured, so the SSO flow is not exercised by this smoke overlay.
