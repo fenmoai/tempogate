@@ -1,6 +1,6 @@
 // Package app is the fx composition root for the tempogate binary.
 //
-// Subsequent epics (E1.3 HTTP server, E2 keys, …) plug their fx.Options into
+// Subsequent modules (HTTP server, keys, …) plug their fx.Options into
 // New via the functional-options pattern below.
 package app
 

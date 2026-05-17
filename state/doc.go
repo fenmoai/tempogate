@@ -3,7 +3,7 @@
 // We follow a per-consumer state-interface convention: each package that
 // reads or writes persistent state defines its OWN narrow interface in its
 // own package, listing only the methods that package needs. The eventual
-// concrete store (E7.2: sqlite.Store) satisfies all of them structurally
+// concrete store (sqlite.Store) satisfies all of them structurally
 // without any package importing state/.
 //
 // To add a new consumer:
