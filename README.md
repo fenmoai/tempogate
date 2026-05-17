@@ -5,6 +5,7 @@
 [![ci](https://github.com/fenmoai/tempogate/actions/workflows/ci.yml/badge.svg)](https://github.com/fenmoai/tempogate/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/fenmoai/tempogate.svg)](https://pkg.go.dev/github.com/fenmoai/tempogate)
+[![codecov](https://codecov.io/gh/fenmoai/tempogate/graph/badge.svg?token=6WiKK8pF1p)](https://codecov.io/gh/fenmoai/tempogate)
 
 ---
 
