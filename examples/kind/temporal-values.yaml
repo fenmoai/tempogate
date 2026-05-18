@@ -1,0 +1,43 @@
+# Reference, NOT auto-applied by bootstrap.sh.
+#
+# How to point a self-hosted Temporal cluster's STOCK JWT authorizer at
+# tempogate's JWKS. tempogate needs no Temporal fork and no sidecar: Temporal
+# already verifies JWTs against a configurable JWKS and reads a `permissions`
+# claim — these are the knobs that turn that on. Pick whichever matches how
+# you run Temporal.
+#
+# Replace the issuer host with tempogate's externally reachable URL. In
+# cluster that is typically the in-cluster Service DNS for server-to-server
+# JWKS fetches, e.g.
+#   http://tempogate.<namespace>.svc.cluster.local:8000/.well-known/jwks.json
+# while the Web UI / browser uses the public ingress URL
+#   https://tempogate.example.com
+
+# ── A. Temporal via the official Helm chart (temporalio/helm-charts) ────────
+# Merge into that chart's values. The stock config template wires the default
+# authorizer from these keys.
+server:
+  config:
+    authorization:
+      jwtKeyProvider:
+        keySourceURIs:
+          - "http://tempogate.tempogate.svc.cluster.local:8000/.well-known/jwks.json"
+        refreshInterval: 1m
+      # The defaults; stated so the intent is explicit. The default
+      # ClaimMapper reads the `permissions: ["<namespace>:<action>"]` claim
+      # tempogate stamps; the default authorizer enforces it.
+      authorizer: "default"
+      claimMapper: "default"
+
+# ── B. Temporal via auto-setup env (temporalio/auto-setup image) ────────────
+# Not Helm values — the equivalent environment variables. This is exactly
+# what examples/docker-compose proves end to end:
+#
+#   TEMPORAL_JWT_KEY_SOURCE1: http://<tempogate>:8000/.well-known/jwks.json
+#   TEMPORAL_JWT_KEY_REFRESH: 1m
+#   TEMPORAL_AUTH_AUTHORIZER: default
+#   TEMPORAL_AUTH_CLAIM_MAPPER: default
+#
+# The Temporal Web UI is configured separately, via stock TEMPORAL_AUTH_*
+# pointed at tempogate as the OIDC provider — see examples/docker-compose and
+# docs/getting-started.md.

@@ -43,6 +43,13 @@ independently of the binary — see [Helm chart releases](#helm-chart-releases).
    `chore:`, `ci:` and merge commits are filtered out of the notes.
 3. Decide the version bump from the change set; tag the exact commit on `main`
    you want released.
+4. **If the release adds or changes a user-facing feature, update
+   [`examples/`](examples/) and [`docs/`](docs/) in the same train.** The
+   docker-compose stack, the kind overlay, the getting-started walkthrough,
+   and [`docs/configuration.md`](docs/configuration.md) are the front door —
+   a new env var, client mode, endpoint, or workflow that ships unreflected
+   there is a release regression. A purely internal change (refactor, perf,
+   dependency bump) needs nothing here.
 
 ## Cutting it
 

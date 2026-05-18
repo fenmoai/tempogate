@@ -1,0 +1,100 @@
+# Configuration reference
+
+Every tempogate setting, its default, and when you need it.
+
+## How configuration is resolved
+
+Three layers, last wins:
+
+1. **Built-in defaults** (the table below).
+2. **An optional `application.yaml`** — searched in the working directory and
+   up to three parent directories, or an explicit path passed to the binary.
+   Nested keys are normal YAML (`oidc: { issuer: ... }`).
+3. **Environment variables** — these **override** the file.
+
+Environment is the recommended surface for containers and Kubernetes. Nested
+config keys flatten with a **`__`** separator: `oidc.google.client_id`
+becomes `OIDC__GOOGLE__CLIENT_ID`.
+
+## Environment variables
+
+### Logging
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `LOG__LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
+
+### HTTP listener
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `HTTP__LISTENER` | `127.0.0.1:8000` | `host:port` for the single public listener (OIDC/OAuth2 + `/healthz` + `/readyz`). The loopback default is unreachable through a container/Service — set `0.0.0.0:8000` in-cluster. |
+
+### State store (SQLite)
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `STATE__SQLITE__PATH` | `/var/lib/tempogate/state.db` | Holds the signing keypair, auth codes, and refresh tokens. Back it with durable storage — losing it rotates signing keys and invalidates every issued refresh token. |
+| `STATE__SQLITE__MAX_CONNS` | `1` | SQLite tolerates one writer. Do not raise; horizontal scaling needs a shared backend (not yet available). |
+| `STATE__SQLITE__BUSY_TIMEOUT` | `5s` | Go duration; how long a query waits on a locked database before erroring. |
+
+### OIDC — server identity and Google federation
+
+| Variable | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `OIDC__ISSUER` | for real deploys | `http://127.0.0.1:8000` | Externally reachable base URL; advertised as `issuer`, derives `jwks_uri`. May include a path for [sub-path hosting](#sub-path-hosting). |
+| `OIDC__CLIENTS` | for any login | _(empty)_ | Comma-separated `id:redirect_uri_prefix`. The first `:` splits id from prefix, so the prefix may contain a scheme. **Every client here is public — PKCE is mandatory.** Register the CLI as `tempogate-cli:http://127.0.0.1:`. |
+| `OIDC__CLIENT_SECRETS` | no | _(empty)_ | Comma-separated `id:secret`. The deliberately-separate, auditable opt-in that promotes a registered client to **confidential** (the PKCE carve-out) — e.g. the Temporal Web UI, which does not implement PKCE. An entry for an unregistered id fails fast. See [docs/pkce-and-confidential-clients.md](pkce-and-confidential-clients.md). |
+| `OIDC__ALLOWED_DOMAINS` | for any login | _(empty)_ | Comma-separated, exact-match email-domain gate applied to Google's verified email after sign-in. **Empty means nobody is admitted.** |
+| `OIDC__GOOGLE__CLIENT_ID` | for any login | _(empty)_ | Upstream Google OAuth client id. |
+| `OIDC__GOOGLE__CLIENT_SECRET` | for any login | _(empty)_ | Upstream Google OAuth client secret. Supply via a Secret; never commit it. |
+| `OIDC__GOOGLE__AUTH_ENDPOINT` | no | `https://accounts.google.com/o/oauth2/v2/auth` | Override only to point the flow at a mock IdP (testing/examples). |
+| `OIDC__GOOGLE__TOKEN_ENDPOINT` | no | `https://oauth2.googleapis.com/token` | Where the callback exchanges the code for Google's `id_token`. Override for a mock IdP. |
+| `OIDC__GOOGLE__ISSUER_URL` | no | `https://accounts.google.com` | Expected `iss` of Google's `id_token` and the OIDC-discovery/JWKS base the callback verifies its signature against. Override for a mock IdP. |
+
+**Minimum for real SSO:** `OIDC__ISSUER`, `OIDC__CLIENTS`,
+`OIDC__ALLOWED_DOMAINS`, `OIDC__GOOGLE__CLIENT_ID`,
+`OIDC__GOOGLE__CLIENT_SECRET`.
+
+### Client-side (the `tempogate` CLI, not the server)
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `TEMPOGATE__ISSUER` | _(empty)_ | Read by `tempogate login` / `tempogate token` to find the server. Equivalent to the `--issuer` flag. Never read by `tempogate serve`. |
+
+## Sub-path hosting
+
+`OIDC__ISSUER` may contain a path, so tempogate can share a hostname with
+another app:
+
+```
+OIDC__ISSUER=https://tempogate.example.com/idp
+```
+
+The **entire OIDC surface** then serves under that prefix
+(`/idp/.well-known/openid-configuration`, `/idp/authorize`, `/idp/token`,
+`/idp/userinfo`, `/idp/callback/google`, …), and the discovery document
+advertises issuer-relative endpoints, so the `iss` claim, the advertised
+endpoints, and the served routes stay in lockstep. Route the prefix to
+tempogate at your proxy and **strip nothing** — tempogate owns the prefix
+natively.
+
+Two consequences:
+
+- **Health probes stay at the root.** `/healthz` and `/readyz` are *not*
+  moved under the prefix — they are infra probes, not part of the public
+  OIDC surface. Point Kubernetes liveness/readiness at `/healthz` / `/readyz`
+  regardless of the issuer path.
+- **The Google redirect URI must include the prefix:** register
+  `https://tempogate.example.com/idp/callback/google` (issuer +
+  `/callback/google`) in the Google OAuth client. See
+  [examples/google-oauth-setup.md](../examples/google-oauth-setup.md).
+
+A root issuer (no path) behaves exactly as a path-less deployment always has.
+
+## See also
+
+- [Helm chart values](../charts/tempogate/README.md#values) — the same
+  settings as chart `values.yaml` keys, plus Secret wiring.
+- [docs/getting-started.md](getting-started.md) — these settings in a working
+  end-to-end context.

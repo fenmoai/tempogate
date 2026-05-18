@@ -72,8 +72,11 @@ Wired and exercised end to end:
 Authorization is currently flat: every admitted identity receives
 cluster-level access (`temporal-system:admin`), the value Temporal's default
 ClaimMapper needs for cluster APIs. Group- or role-derived per-namespace
-scoping, an admin API for long-lived integration keys, and a
-`docker-compose` example are planned.
+scoping and an admin API for long-lived integration keys are planned.
+
+New here? [docs/getting-started.md](docs/getting-started.md) takes you from
+nothing to a working Web-UI SSO + CLI token in under ten minutes, with no
+Google account required (a bundled mock IdP stands in).
 
 ## Quick start
 
@@ -250,10 +253,22 @@ directly. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
+- [docs/getting-started.md](docs/getting-started.md) — zero to working
+  Web-UI SSO + CLI token in under ten minutes (bundled mock IdP)
+- [docs/architecture.md](docs/architecture.md) — how the pieces fit and why
+  it isn't a proxy or a fork
+- [docs/configuration.md](docs/configuration.md) — every environment
+  variable, with precedence and sub-path hosting
 - [docs/cli-loopback-login.md](docs/cli-loopback-login.md) — the
   `tempogate login` loopback flow, persistence, and auto-refresh
 - [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md)
   — PKCE posture and the confidential-client carve-out
+- [examples/docker-compose/](examples/docker-compose/README.md) — the full
+  stack locally, one command
+- [examples/kind/](examples/kind/README.md) — deploy to a local Kubernetes
+  cluster via the chart
+- [examples/google-oauth-setup.md](examples/google-oauth-setup.md) —
+  create the upstream Google OAuth client
 - [charts/tempogate/README.md](charts/tempogate/README.md) — Helm deployment
 
 ## Security
