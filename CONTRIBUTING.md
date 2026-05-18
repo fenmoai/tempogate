@@ -64,4 +64,13 @@ make start     # runs `tempogate serve` with build-info ldflags
 
 ## Releasing
 
-Releases are tag-driven and run via `release.yml`. Maintainers will cut tags; contributors don't need to.
+The **binary + container image** are tag-driven and run via `release.yml`.
+Maintainers cut `vX.Y.Z` tags; contributors don't need to.
+
+The **Helm chart** is versioned and released independently of the binary
+via `chart-release.yml`. Its version lives in
+`charts/tempogate/Chart.yaml` (`version:`, semver) and its release tag is
+`chart-vX.Y.Z` (the `chart-` prefix keeps it distinct from the binary's
+`vX.Y.Z`). Bumping `version:` in a PR and merging to `main` cuts the
+release; a maintainer can also push a `chart-vX.Y.Z` tag explicitly. Full
+mechanics are in [RELEASING.md](RELEASING.md).

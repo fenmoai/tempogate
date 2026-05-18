@@ -13,6 +13,9 @@ Every release produces **two artifacts** from one trigger:
 Both jobs live in [`.github/workflows/release.yml`](.github/workflows/release.yml)
 and fire off the same trigger.
 
+The **Helm chart** is a third artifact, versioned and released
+independently of the binary — see [Helm chart releases](#helm-chart-releases).
+
 ## TL;DR
 
 | Goal | Do this | You get |
@@ -112,3 +115,56 @@ committing the bump directly.
   re-tag a higher `-rc.N`.
 - Bad **stable**: do not delete or move the tag. Cut `vX.Y.(Z+1)` with the
   fix; `:latest` and the cask move forward on the next stable release.
+
+## Helm chart releases
+
+The Helm chart in [`charts/tempogate/`](charts/tempogate/) is versioned and
+released **independently of the binary**. A chart-only fix never bumps the
+server image, and an image bump never republishes an unchanged chart. The
+workflow is
+[`.github/workflows/chart-release.yml`](.github/workflows/chart-release.yml).
+
+| Goal | Do this | You get |
+| --- | --- | --- |
+| **Cut a chart release** | Bump `charts/tempogate/Chart.yaml` `version:` (semver) in a PR; merge to `main` | OCI artifact `oci://ghcr.io/fenmoai/charts/tempogate:X.Y.Z` · GitHub Release `chart-vX.Y.Z` with the `.tgz` attached · the `chart-vX.Y.Z` tag, created by the workflow |
+| **Cut it explicitly** | `git tag chart-vX.Y.Z && git push origin chart-vX.Y.Z` — the tagged commit's `Chart.yaml` `version` must equal `X.Y.Z` | Same as above |
+
+### Versioning rules
+
+- `charts/tempogate/Chart.yaml` `version` is semver; the release tag is
+  `chart-v<version>` — the `chart-` prefix keeps it distinct from the
+  binary's `vX.Y.Z`.
+- Bump `version` for **any** change to the chart or its templates. Bump
+  `appVersion` (and normally `version` too) when the chart should default
+  to a new server image tag.
+- A published chart version is never re-pushed. A `Chart.yaml` change that
+  doesn't move `version` is a no-op — the workflow skips when the
+  `chart-v<version>` Release already exists. Fix a bad chart release by
+  bumping to the next patch, exactly as for the binary.
+
+### One-time registry setup
+
+The first push creates `ghcr.io/fenmoai/charts/tempogate` as a **private**
+package. For `helm install oci://ghcr.io/fenmoai/charts/tempogate` to work
+**without authentication**, a maintainer must, once, set that package's
+visibility to **public** in the org's GitHub Packages settings and link it
+to this repository. Later versions inherit the setting.
+
+### Why not `helm/chart-releaser-action`
+
+That action has no OCI registry support — its own docs tell you to do the
+OCI push yourself — and it names releases `<chart>-<version>` rather than
+the `chart-vX.Y.Z` scheme used here. The native Helm OCI client is the
+supported path for `oci://` registries, so the workflow `helm package`s
+and `helm push`es directly, then attaches the `.tgz` to a `gh`-created
+GitHub Release.
+
+### Verify a chart release
+
+```bash
+# the published OCI artifact resolves and templates cleanly
+helm template t oci://ghcr.io/fenmoai/charts/tempogate --version X.Y.Z >/dev/null
+
+# the GitHub Release exists with the packaged chart attached
+gh release view chart-vX.Y.Z --repo fenmoai/tempogate
+```
