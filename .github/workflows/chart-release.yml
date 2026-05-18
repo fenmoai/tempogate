@@ -1,0 +1,157 @@
+name: chart-release
+
+# Publishes the Helm chart as an OCI artifact to GHCR and cuts a GitHub
+# Release with the packaged `.tgz` attached.
+#
+# The chart is versioned independently of the binary's `vX.Y.Z` tags
+# (chart tags are `chart-vX.Y.Z`) so a chart-only fix never bumps the
+# server image, and an image bump never republishes an unchanged chart.
+#
+# Why plain `helm push` and not `helm/chart-releaser-action`: that action
+# has no OCI registry support — its own docs tell you to do the OCI push
+# yourself — and it names releases `<chart>-<version>`, not the
+# `chart-vX.Y.Z` scheme used here. The native Helm OCI client is the
+# supported path for `oci://` registries, so we use it directly.
+#
+# Two ways in, one publish path:
+#   * Push a `chart-vX.Y.Z` tag — explicit, maintainer-driven release.
+#   * Merge a `charts/tempogate/Chart.yaml` version bump to `main` — the
+#     job auto-detects the new version and releases it (creating the
+#     `chart-vX.Y.Z` tag + Release itself). A Chart.yaml change that does
+#     not move `version` is a no-op (the tag already exists).
+
+on:
+  push:
+    tags: ['chart-v*.*.*']
+    branches: [main]
+    paths: ['charts/tempogate/Chart.yaml']
+
+permissions:
+  contents: write   # create the GitHub Release + chart-v* tag
+  packages: write   # push the chart to GHCR (OCI)
+  id-token: write   # reserved for future cosign keyless signing
+
+# Serialize chart releases globally: publishing the same chart version
+# twice concurrently would race the OCI push and the Release creation.
+concurrency:
+  group: chart-release
+  cancel-in-progress: false
+
+env:
+  CHART_DIR: charts/tempogate
+  OCI_REPO: oci://ghcr.io/fenmoai/charts
+
+jobs:
+  publish:
+    name: package + push (GHCR OCI) + GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # full history so `gh release` notes have a base
+
+      - uses: azure/setup-helm@v4
+        with:
+          # Pinned to the Helm line the chart is authored against (the
+          # chart relies on Helm v4 hook-ordering semantics).
+          version: v4.0.5
+
+      - name: Resolve chart version + release decision
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          chart_version="$(awk '/^version:/ { gsub(/["[:space:]]/, "", $2); print $2; exit }' "$CHART_DIR/Chart.yaml")"
+          if [ -z "$chart_version" ]; then
+            echo "::error::could not read 'version:' from $CHART_DIR/Chart.yaml"
+            exit 1
+          fi
+
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+            tag_version="${tag#chart-v}"
+            # A mismatched tag would publish an artifact whose internal
+            # Chart.yaml disagrees with its OCI tag — fail loudly.
+            if [ "$tag_version" != "$chart_version" ]; then
+              echo "::error::tag $tag implies version $tag_version but $CHART_DIR/Chart.yaml says $chart_version"
+              exit 1
+            fi
+            version="$chart_version"
+          else
+            version="$chart_version"
+            tag="chart-v${version}"
+          fi
+
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::chart version '$version' is not semver"
+            exit 1
+          fi
+
+          # Idempotent: a published version is never re-pushed (matches the
+          # binary release policy — fix a bad release with the next patch).
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists — nothing to publish"
+            should_release=false
+          else
+            should_release=true
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "should_release=$should_release"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Lint chart
+        if: steps.resolve.outputs.should_release == 'true'
+        run: helm lint "$CHART_DIR"
+
+      - name: Package chart
+        if: steps.resolve.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .chart-dist
+          helm package "$CHART_DIR" --destination .chart-dist
+          ls -l .chart-dist
+
+      - name: Log in to GHCR
+        if: steps.resolve.outputs.should_release == 'true'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" \
+            | helm registry login ghcr.io \
+                --username "${{ github.actor }}" \
+                --password-stdin
+
+      - name: Push chart to GHCR (OCI)
+        if: steps.resolve.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          version="${{ steps.resolve.outputs.version }}"
+          helm push ".chart-dist/tempogate-${version}.tgz" "$OCI_REPO"
+
+      - name: Create GitHub Release
+        if: steps.resolve.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.resolve.outputs.version }}"
+          tag="${{ steps.resolve.outputs.tag }}"
+          pkg=".chart-dist/tempogate-${version}.tgz"
+
+          # On the tag path the tag already exists; on the main path it
+          # does not yet — `--target` makes `gh` create it at this commit.
+          gh release create "$tag" "$pkg" \
+            --target "$GITHUB_SHA" \
+            --title "tempogate Helm chart v${version}" \
+            --notes "Install without cloning the repo:
+
+          \`\`\`bash
+          helm install tempogate oci://ghcr.io/fenmoai/charts/tempogate --version ${version}
+          \`\`\`
+
+          See [\`charts/tempogate/README.md\`](https://github.com/${{ github.repository }}/blob/${tag}/charts/tempogate/README.md) for values and prerequisites."

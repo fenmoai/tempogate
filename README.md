@@ -137,7 +137,15 @@ docker run --rm -p 8000:8000 tempogate:dev
 ```
 
 Kubernetes deployment is covered by the chart in
-[`charts/tempogate/`](charts/tempogate/README.md).
+[`charts/tempogate/`](charts/tempogate/README.md). It is published as an
+OCI artifact, so no repo clone is needed:
+
+```bash
+helm install tempogate oci://ghcr.io/fenmoai/charts/tempogate --version 0.1.0
+```
+
+The chart is versioned independently of the binary; pick the version from
+the [chart releases](https://github.com/fenmoai/tempogate/releases?q=chart-v).
 
 ## Personal tokens from a laptop
 
