@@ -1,0 +1,36 @@
+# Build recipe for the example stack's stand-in upstream IdP.
+#
+# The Go source under test/e2e/mockgoogle is a real, tiny OIDC provider:
+# OIDC discovery, a JWKS, a one-click consent screen, and a token endpoint
+# that returns a properly RS256-signed id_token. It exists for the e2e test
+# but is exactly what this example needs to prove tempogate end to end with
+# zero external accounts. We compile that same source here so the source of
+# truth stays single; this Dockerfile is owned by the example so the e2e
+# build recipe stays free to change independently.
+#
+# Deliberately plain (no `# syntax=`, no `RUN --mount` cache mounts) so it
+# builds under any Docker, not only a BuildKit-capable builder. Build
+# context is the repository root so go.mod and the mockgoogle package are
+# in scope:
+#
+#   docker build -f examples/docker-compose/Dockerfile.mockoidc -t mockoidc .
+#
+# docker compose builds it for you; see docker-compose.yml.
+
+ARG GO_VERSION=1.26.3
+
+FROM golang:${GO_VERSION}-alpine AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ENV CGO_ENABLED=0
+# lestrrat-go/jwx/v4 imports encoding/json/v2, still behind this experiment.
+ENV GOEXPERIMENT=jsonv2
+RUN go build -trimpath -o /out/mockoidc ./test/e2e/mockgoogle
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/mockoidc /mockoidc
+USER nonroot:nonroot
+EXPOSE 8081
+ENTRYPOINT ["/mockoidc"]

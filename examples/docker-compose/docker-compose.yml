@@ -1,0 +1,171 @@
+# A complete, self-contained tempogate demo: a Temporal cluster whose Web UI
+# does OIDC SSO through tempogate, and whose gRPC frontend verifies the JWTs
+# tempogate mints against tempogate's JWKS. The upstream IdP is a bundled
+# mock, so `docker compose up` proves the whole chain with zero external
+# accounts.
+#
+# This is the interactive twin of test/e2e/web_ui_sso_test.go — same images,
+# same env wiring. That test is the source of truth; if Temporal's auto-setup
+# auth templating ever changes, reconcile here against it.
+#
+# Hostnames (tempogate / temporal-ui / mockoidc) must resolve to the SAME
+# place from your host browser AND between containers, because each appears
+# in both a browser redirect and a server-to-server call. The portable way
+# is one /etc/hosts line mapping them to 127.0.0.1 (see README.md). On Linux
+# you can instead skip that edit with docker-compose.host-network.yml.
+
+name: tempogate-example
+
+services:
+  # Stand-in upstream IdP (a real, tiny OIDC server — see Dockerfile.mockoidc).
+  # Plays the role Google plays in a real deployment.
+  mockoidc:
+    build:
+      context: ../..
+      dockerfile: examples/docker-compose/Dockerfile.mockoidc
+    environment:
+      MOCK_LISTEN: ":8081"
+      # Must equal tempogate's OIDC__GOOGLE__ISSUER_URL: it is the `iss` the
+      # mock stamps into the id_token and the base tempogate runs OIDC
+      # discovery against. The name resolves to this container in-network and
+      # to 127.0.0.1 on your host (the consent screen is browser-facing).
+      MOCK_ISSUER: "http://mockoidc:8081"
+      # The identity the one-click consent screen asserts. Its domain must be
+      # in TEMPOGATE_ALLOWED_DOMAINS or tempogate's callback returns 403.
+      MOCK_EMAIL: "${DEMO_EMAIL:-alice@example.com}"
+    ports:
+      - "8081:8081"
+
+  # One-shot schema migration. `serve` refuses to run against a stale store,
+  # so this must finish first; the two share the state volume.
+  tempogate-migrate:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    # Or pin a published image instead of building from source:
+    # image: ghcr.io/fenmoai/tempogate:latest
+    command: ["migrate"]
+    # Named volumes are root-owned; the distroless image runs as nonroot and
+    # could not create the SQLite file. Running as root here (and in serve)
+    # is what the e2e test does for the same reason — demo only.
+    user: "0:0"
+    environment:
+      STATE__SQLITE__PATH: /state/state.db
+      OIDC__ISSUER: "http://tempogate:8000"
+    volumes:
+      - tempogate-state:/state
+
+  tempogate:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    # image: ghcr.io/fenmoai/tempogate:latest
+    command: ["serve"]
+    user: "0:0"
+    environment:
+      HTTP__LISTENER: "0.0.0.0:8000"
+      STATE__SQLITE__PATH: /state/state.db
+      LOG__LEVEL: "${LOG_LEVEL:-info}"
+      # Externally reachable base URL — advertised as `issuer`, derives
+      # jwks_uri. Same string on host and in-network (see header comment).
+      OIDC__ISSUER: "http://tempogate:8000"
+      # Two registered clients: the Temporal Web UI (confidential — see
+      # CLIENT_SECRETS) and the CLI loopback (public, PKCE). The CLI entry
+      # lets `tempogate login` work against this stack too.
+      OIDC__CLIENTS: "temporal-ui:http://temporal-ui:8080/auth/sso/callback,tempogate-cli:http://127.0.0.1:"
+      OIDC__CLIENT_SECRETS: "temporal-ui:${TEMPORAL_UI_CLIENT_SECRET:-local-temporal-ui-confidential-secret}"
+      OIDC__ALLOWED_DOMAINS: "${TEMPOGATE_ALLOWED_DOMAINS:-example.com}"
+      # Point tempogate's upstream Google client at the bundled mock.
+      OIDC__GOOGLE__CLIENT_ID: "tempogate-upstream"
+      OIDC__GOOGLE__CLIENT_SECRET: "tempogate-upstream-secret"
+      OIDC__GOOGLE__AUTH_ENDPOINT: "http://mockoidc:8081/auth"
+      OIDC__GOOGLE__TOKEN_ENDPOINT: "http://mockoidc:8081/token"
+      OIDC__GOOGLE__ISSUER_URL: "http://mockoidc:8081"
+    ports:
+      - "8000:8000"
+    depends_on:
+      tempogate-migrate:
+        condition: service_completed_successfully
+      mockoidc:
+        condition: service_started
+    volumes:
+      - tempogate-state:/state
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Temporal via auto-setup, with its STOCK JWT authorizer pointed at
+  # tempogate's JWKS. test/e2e/web_ui_sso_test.go explains the internal-
+  # frontend + explicit-SERVICES rationale; this demo diverges from it in
+  # one deliberate way:
+  #
+  # The e2e test only does a token-bearing ListNamespaces, so it never needs
+  # a provisioned `default` namespace and just SKIPs its creation. A browser
+  # UI does need it. auto-setup runs ALL its provisioning (cluster health,
+  # default namespace, search attributes) through TEMPORAL_ADDRESS — leave it
+  # unset and it hits the external authorizing frontend (:7233) with no token,
+  # so every call is "Request unauthorized" and `default` is never created.
+  # Pointing it at the internal frontend (:7236) — auth-exempt by design,
+  # which is exactly why USE_INTERNAL_FRONTEND is on — lets auto-setup
+  # provision unauthenticated, while the external :7233 still enforces the
+  # JWT for the actual SSO/CLI demo path.
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: db
+      DBNAME: temporal
+      BIND_ON_IP: 0.0.0.0
+      USE_INTERNAL_FRONTEND: "true"
+      # Provision over the auth-exempt internal frontend (see comment above).
+      TEMPORAL_ADDRESS: "127.0.0.1:7236"
+      SERVICES: "frontend:internal-frontend:history:matching:worker"
+      TEMPORAL_JWT_KEY_SOURCE1: "http://tempogate:8000/.well-known/jwks.json"
+      TEMPORAL_JWT_KEY_REFRESH: "10s"
+      TEMPORAL_AUTH_AUTHORIZER: default
+      TEMPORAL_AUTH_CLAIM_MAPPER: default
+    ports:
+      - "7233:7233"
+    depends_on:
+      db:
+        condition: service_healthy
+      tempogate:
+        condition: service_started
+
+  # Temporal Web UI, configured ONLY via stock TEMPORAL_AUTH_* env vars —
+  # tempogate needs no Temporal-specific support code.
+  temporal-ui:
+    image: temporalio/ui:2.32.0
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_UI_PORT: "8080"
+      TEMPORAL_AUTH_ENABLED: "true"
+      TEMPORAL_AUTH_TYPE: oidc
+      TEMPORAL_AUTH_PROVIDER_URL: "http://tempogate:8000"
+      TEMPORAL_AUTH_ISSUER_URL: "http://tempogate:8000"
+      TEMPORAL_AUTH_CLIENT_ID: temporal-ui
+      TEMPORAL_AUTH_CLIENT_SECRET: "${TEMPORAL_UI_CLIENT_SECRET:-local-temporal-ui-confidential-secret}"
+      TEMPORAL_AUTH_CALLBACK_URL: "http://temporal-ui:8080/auth/sso/callback"
+      TEMPORAL_AUTH_SCOPES: "openid email"
+    ports:
+      - "8080:8080"
+    depends_on:
+      temporal:
+        condition: service_started
+      tempogate:
+        condition: service_started
+
+volumes:
+  tempogate-state:

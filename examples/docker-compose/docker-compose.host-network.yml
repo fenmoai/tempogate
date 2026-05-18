@@ -1,0 +1,55 @@
+# Linux-only overlay: skip the /etc/hosts edit by putting every container in
+# the host's network namespace, so `localhost:<port>` means the same thing in
+# your browser and between services. One issuer string then resolves
+# everywhere with no name tricks.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.host-network.yml up --build
+#
+# Linux only. Docker Desktop (macOS/Windows) runs containers inside a Linux
+# VM, so `network_mode: host` binds that VM — not your machine — and
+# published ports are ignored: the browser-to-container hostname mismatch
+# this is meant to solve comes right back. On macOS/Windows use the default
+# docker-compose.yml with the /etc/hosts line from README.md.
+#
+# Compose will warn "Published ports are discarded when using host network
+# mode" for the base file's `ports:` — harmless; host networking exposes
+# them on localhost directly. These services now bind real host ports:
+# 8000 (tempogate), 8080 (temporal-ui), 8081 (mockoidc), 7233 (temporal),
+# 5432 (postgres) — free them first if something else is using them.
+
+services:
+  mockoidc:
+    network_mode: host
+    environment:
+      MOCK_ISSUER: "http://localhost:8081"
+
+  tempogate-migrate:
+    network_mode: host
+    environment:
+      OIDC__ISSUER: "http://localhost:8000"
+
+  tempogate:
+    network_mode: host
+    environment:
+      OIDC__ISSUER: "http://localhost:8000"
+      OIDC__CLIENTS: "temporal-ui:http://localhost:8080/auth/sso/callback,tempogate-cli:http://127.0.0.1:"
+      OIDC__GOOGLE__AUTH_ENDPOINT: "http://localhost:8081/auth"
+      OIDC__GOOGLE__TOKEN_ENDPOINT: "http://localhost:8081/token"
+      OIDC__GOOGLE__ISSUER_URL: "http://localhost:8081"
+
+  db:
+    network_mode: host
+
+  temporal:
+    network_mode: host
+    environment:
+      POSTGRES_SEEDS: localhost
+      TEMPORAL_JWT_KEY_SOURCE1: "http://localhost:8000/.well-known/jwks.json"
+
+  temporal-ui:
+    network_mode: host
+    environment:
+      TEMPORAL_ADDRESS: localhost:7233
+      TEMPORAL_AUTH_PROVIDER_URL: "http://localhost:8000"
+      TEMPORAL_AUTH_ISSUER_URL: "http://localhost:8000"
+      TEMPORAL_AUTH_CALLBACK_URL: "http://localhost:8080/auth/sso/callback"
