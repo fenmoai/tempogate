@@ -50,7 +50,7 @@ jobs:
         with:
           fetch-depth: 0   # full history so `gh release` notes have a base
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           # Pinned to the Helm line the chart is authored against (the
           # chart relies on Helm v4 hook-ordering semantics).
