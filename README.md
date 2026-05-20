@@ -102,6 +102,40 @@ New here? [docs/getting-started.md](docs/getting-started.md) takes you from
 nothing to a working Web-UI SSO + CLI token in under ten minutes, with no
 Google account required (a bundled mock IdP stands in).
 
+## Multi-tenancy
+
+Tempogate serializes a token's authorization as a flat `permissions` claim of
+`"<namespace>:<role>"` entries — the exact shape Temporal's default JWT
+`ClaimMapper` parses into `claims.Namespaces[ns] = role`. Two entries in the
+array for **different** namespaces accumulate independently, so a single token
+can grant `read` on one namespace and `admin` on another; two entries for the
+**same** namespace last-write-wins, mirroring the ClaimMapper's own behaviour.
+
+The four canonical Temporal roles — `read`, `write`, `worker`, `admin` —
+are honoured verbatim. Cluster-wide access is expressed by granting a role on
+the `temporal-system` namespace (the only construct the default ClaimMapper
+recognises for "every namespace"); the literal `*` is rejected as a real
+namespace name by the same authorizer, so the `perms.AddWildcard` Go-API
+sugar is internally rewritten to `temporal-system:<role>` before serialization.
+The model lives in the [`perms`](perms/perms.go) package; both the OIDC
+`/token` flow and the `/admin/keys` admin API funnel through `perms.Grant`
+so the wire shape stays uniform regardless of which path minted the token.
+
+A token issued for `tenant-a` cannot perform any action on `tenant-b`. That
+boundary is enforced at the Temporal frontend by the default authorizer — not
+inside tempogate — and is the reference behaviour proved end-to-end in
+[`test/e2e/multi_tenant_test.go`](test/e2e/multi_tenant_test.go), which
+provisions two namespaces against a real `temporal-frontend` and asserts both
+the cross-namespace denial (gRPC `PermissionDenied`) and the multi-namespace
+accumulation (one token, two namespaces, different roles enforced
+independently).
+
+The `/admin/keys` admin API deliberately mints one (namespace, role) per key
+so audit and rotation always reason over a minimal scope; a caller that needs
+multi-namespace authorization issues several keys, or — for humans — picks up
+the multi-ns shape automatically through the OIDC `/token` path as the
+identity-mapping layer matures.
+
 ## Quick start
 
 Run a published image (once a release is cut):
