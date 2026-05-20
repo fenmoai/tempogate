@@ -53,13 +53,31 @@ func (s *Store) IntegrationKeyByID(ctx context.Context, id string) (admin.Integr
 	return k, nil
 }
 
+// defaultListLimit is the page size the store falls back to when the caller
+// passes a non-positive Limit. The HTTP handler clamps before reaching here,
+// but the store is also reachable from other callers (cleanup jobs, future
+// internal tools), so it normalises at its own boundary rather than trusting
+// every upstream to do the right thing. The value mirrors admin.defaultListLimit;
+// keeping them aligned is a soft contract (the handler's clamp is authoritative
+// for HTTP traffic) but worth restating for direct callers.
+const defaultListLimit = 50
+
 // ListIntegrationKeys fetches limit+1 rows so the calling handler can detect
 // "has more" without a separate COUNT. Ordering is id DESC, which under
 // UUIDv7's monotonic time-bits is equivalent to created_at DESC with a
 // guaranteed unique tiebreaker — concurrent inserts can never reshuffle a
 // paginating client's view because new rows always land with a higher id than
 // anything already returned.
+//
+// Non-positive Limit values are normalised to defaultListLimit at the
+// function boundary so a caller that bypasses the handler's clamp cannot
+// turn Limit=-1 into LIMIT 0 (a silent "no results" that masks a bug).
 func (s *Store) ListIntegrationKeys(ctx context.Context, f admin.ListFilter) ([]admin.IntegrationKey, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, namespace, role, owner, jti, created_at, expires_at, revoked_at
 		 FROM integration_keys
@@ -71,14 +89,14 @@ func (s *Store) ListIntegrationKeys(ctx context.Context, f admin.ListFilter) ([]
 		f.Owner, f.Owner,
 		f.Namespace, f.Namespace,
 		f.Cursor, f.Cursor,
-		f.Limit+1,
+		limit+1,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list integration keys: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := make([]admin.IntegrationKey, 0, f.Limit+1)
+	out := make([]admin.IntegrationKey, 0, limit+1)
 	for rows.Next() {
 		var (
 			k       admin.IntegrationKey

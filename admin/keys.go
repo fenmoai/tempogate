@@ -46,18 +46,40 @@ type KeysOption func(*Keys)
 
 // WithClock swaps the clock the handler reads for CreatedAt stamps and for
 // computing the JWT's TTL from an absolute ExpiresAt. For tests.
+//
+// Panics on nil so a wiring mistake fails at construction rather than
+// surfacing as a nil-function call on the first request.
 func WithClock(now func() time.Time) KeysOption {
+	if now == nil {
+		panic("admin: WithClock requires a non-nil clock")
+	}
 	return func(k *Keys) { k.now = now }
 }
 
 // WithIDGenerator swaps the function that mints the IntegrationKey's primary
 // id. For tests; the production wiring uses uuid.NewV7 so the id is
 // time-sortable and globally unique.
+//
+// Panics on nil for the same reason as WithClock.
 func WithIDGenerator(fn func() (string, error)) KeysOption {
+	if fn == nil {
+		panic("admin: WithIDGenerator requires a non-nil generator")
+	}
 	return func(k *Keys) { k.newID = fn }
 }
 
+// NewKeys wires the registry and signer the handler will call on every
+// request. Both are required: a nil registry would NPE inside Save/ByID/etc.
+// on the first call; a nil signer would NPE inside Mint. Panicking here turns
+// a wiring bug into an immediate, obvious startup failure instead of a
+// per-request crash that only surfaces in production traffic.
 func NewKeys(registry KeyRegistry, signer *keys.Signer, opts ...KeysOption) *Keys {
+	if registry == nil {
+		panic("admin: NewKeys requires a non-nil registry")
+	}
+	if signer == nil {
+		panic("admin: NewKeys requires a non-nil signer")
+	}
 	k := &Keys{
 		registry:     registry,
 		signer:       signer,
