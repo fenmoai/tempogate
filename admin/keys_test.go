@@ -488,6 +488,63 @@ func (s *KeysSuite) TestDeleteUnknownReturns404() {
 	s.Equal(http.StatusNotFound, resp.StatusCode)
 }
 
+func (s *KeysSuite) TestDeleteHydratesDenylistWithMintedJTI() {
+	// Mint via POST first so the registry has a row with a real jti.
+	postResp, raw := s.postKey(postBody{Namespace: "ns", Role: "read", Owner: "o"})
+	s.Require().Equal(http.StatusCreated, postResp.StatusCode)
+	var posted struct {
+		ID  string `json:"id"`
+		JWT string `json:"jwt"`
+	}
+	s.Require().NoError(json.Unmarshal(raw, &posted))
+
+	row, err := s.registry.ByID(s.ctx, posted.ID)
+	s.Require().NoError(err)
+
+	hydrator := &recordingHydrator{}
+	srv := s.handlerWith(s.registry, s.signer,
+		admin.WithIDGenerator(s.nextID),
+		admin.WithDenylistHydrator(hydrator),
+	)
+	defer srv.Close()
+
+	del := s.doRequest(srv, http.MethodDelete, "/admin/keys/"+posted.ID, nil)
+	defer func() { _ = del.Body.Close() }()
+	s.Equal(http.StatusNoContent, del.StatusCode)
+	s.Equal([]string{row.JTI}, hydrator.hydrated,
+		"DELETE must push the just-revoked jti into the verifier cache")
+
+	// A second DELETE is idempotent (same jti returned by MarkRevoked)
+	// and must call Hydrate again so a multi-instance deployment that
+	// only saw the second request stays consistent.
+	del2 := s.doRequest(srv, http.MethodDelete, "/admin/keys/"+posted.ID, nil)
+	defer func() { _ = del2.Body.Close() }()
+	s.Equal(http.StatusNoContent, del2.StatusCode)
+	s.Equal([]string{row.JTI, row.JTI}, hydrator.hydrated)
+}
+
+func (s *KeysSuite) TestDeleteUnknownDoesNotHydrate() {
+	hydrator := &recordingHydrator{}
+	srv := s.handlerWith(s.registry, s.signer,
+		admin.WithIDGenerator(s.nextID),
+		admin.WithDenylistHydrator(hydrator),
+	)
+	defer srv.Close()
+
+	resp := s.doRequest(srv, http.MethodDelete, "/admin/keys/"+uuid.NewString(), nil)
+	defer func() { _ = resp.Body.Close() }()
+	s.Equal(http.StatusNotFound, resp.StatusCode)
+	s.Empty(hydrator.hydrated, "a 404 revoke must not call Hydrate")
+}
+
+type recordingHydrator struct {
+	hydrated []string
+}
+
+func (r *recordingHydrator) Hydrate(jti string) {
+	r.hydrated = append(r.hydrated, jti)
+}
+
 func (s *KeysSuite) TestPathConstantsMatchRegisteredRoutes() {
 	s.Equal("/admin/keys", admin.KeysPath)
 	s.Equal("/admin/keys/{id}", admin.KeysIDPath)

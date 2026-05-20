@@ -54,6 +54,12 @@ func (s *FxSuite) TestFxProducesAdminRegistrar() {
 			return k, nil
 		}),
 		fx.Provide(func(k *keys.Keys) *keys.Signer { return keys.NewSigner(keys.WithKeys(k)) }),
+		// admin's DELETE handler hydrates the verifier-side denylist cache
+		// after a successful revoke. The fx graph composes against the
+		// concrete *keys.DenylistCache; production wiring builds one over
+		// state/sqlite.Store, but this graph only proves wiring so a
+		// no-op checker is enough.
+		fx.Provide(func() *keys.DenylistCache { return keys.NewDenylistCache() }),
 		// admin depends on admin.KeyRegistry; provide the sqlite adapter
 		// the same way state/sqlite/fx.go does.
 		fx.Provide(sqliteAdminAdapter),

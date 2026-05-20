@@ -33,6 +33,7 @@ const (
 type Keys struct {
 	registry     KeyRegistry
 	signer       *keys.Signer
+	hydrator     DenylistHydrator
 	now          func() time.Time
 	newID        func() (string, error)
 	defaultLimit int
@@ -66,6 +67,14 @@ func WithIDGenerator(fn func() (string, error)) KeysOption {
 		panic("admin: WithIDGenerator requires a non-nil generator")
 	}
 	return func(k *Keys) { k.newID = fn }
+}
+
+// WithDenylistHydrator wires the in-process verifier cache the DELETE
+// handler nudges after a successful revoke. Nil-safe: the handler skips the
+// hydrate call when no hydrator is configured, which keeps the test wiring
+// (and tempogate processes that don't verify their own tokens) simple.
+func WithDenylistHydrator(h DenylistHydrator) KeysOption {
+	return func(k *Keys) { k.hydrator = h }
 }
 
 // NewKeys wires the registry and signer the handler will call on every
@@ -326,13 +335,21 @@ func (h *Keys) list(ctx context.Context, in *listInput) (*listOutput, error) {
 
 func (h *Keys) delete(ctx context.Context, in *deleteInput) (*deleteOutput, error) {
 	// MarkRevoked returns the jti regardless of whether this is the first
-	// or a repeat revoke, so a future denylist enqueue can run on every
-	// call without worrying about idempotency.
-	if _, err := h.registry.MarkRevoked(ctx, in.ID); err != nil {
+	// or a repeat revoke, so the denylist hydrate below runs on every call
+	// without worrying about idempotency.
+	jti, err := h.registry.MarkRevoked(ctx, in.ID)
+	if err != nil {
 		if errors.Is(err, ErrIntegrationKeyNotFound) {
 			return nil, huma.Error404NotFound("integration key not found")
 		}
 		return nil, fmt.Errorf("admin: revoke integration key: %w", err)
+	}
+	if h.hydrator != nil {
+		// Storage is already authoritative — MarkRevoked wrote the
+		// jti_denylist row in the same transaction. The hydrate call only
+		// shortens the window during which an in-process verifier cache
+		// could still hold a stale "active" entry for this jti.
+		h.hydrator.Hydrate(jti)
 	}
 	return &deleteOutput{Status: http.StatusNoContent}, nil
 }

@@ -38,18 +38,24 @@ func newFx(p Params) (*Store, error) {
 
 // Fx registers the sqlite store as *Store (for direct callers like
 // cmd/serve.go) plus every consumer-side interface it satisfies
-// (keys.KeyStore, oidc.AuthRequestStore, oidc.CallbackStore, oidc.TokenStore),
-// using a single underlying constructor. admin.KeyRegistry is provided as a
-// separate adapter constructor (see admin_adapter.go) because its short
-// method names (Save/ByID/List/MarkRevoked) deliberately differ from the
-// prefixed methods on *Store (SaveIntegrationKey, ...) to allow multiple
-// consumers to share short names without colliding on the same struct.
+// (keys.KeyStore, keys.DenylistChecker, oidc.AuthRequestStore,
+// oidc.CallbackStore, oidc.TokenStore), using a single underlying
+// constructor. admin.KeyRegistry is provided as a separate adapter
+// constructor (see admin_adapter.go) because its short method names
+// (Save/ByID/List/MarkRevoked) deliberately differ from the prefixed
+// methods on *Store (SaveIntegrationKey, ...) to allow multiple consumers
+// to share short names without colliding on the same struct.
+//
+// keys.DenylistChecker happens to use the bare name IsRevoked — which lines
+// up with Store.IsRevoked — so a direct fx.As binding suffices without an
+// adapter shim. (See state/doc.go for the prefixed-vs-short naming rule.)
 func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(
 			fx.Annotate(
 				newFx,
 				fx.As(new(keys.KeyStore)),
+				fx.As(new(keys.DenylistChecker)),
 				fx.As(new(oidc.AuthRequestStore)),
 				fx.As(new(oidc.CallbackStore)),
 				fx.As(new(oidc.TokenStore)),
