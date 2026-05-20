@@ -7,7 +7,7 @@ import (
 	"github.com/fenmoai/tempogate/keys"
 )
 
-type resultParams struct {
+type serversParams struct {
 	fx.In
 
 	Readiness    *Readiness
@@ -17,18 +17,18 @@ type resultParams struct {
 
 	// Registrars are contributed by feature packages (e.g. oidc) into the
 	// shared group so they can append Huma operations without api importing
-	// them. They land on the OIDC-surface adapter, which moves under
+	// them. They land on the public Huma API; the OIDC surface moves under
 	// basePath when one is configured.
 	Registrars []func(huma.API) `group:"api_registrars"`
 
-	// RootRegistrars also avoid api importing the feature package, but they
-	// pin the registered routes to the listener root regardless of
-	// basePath. admin/ uses this so /admin/keys is never shadowed by a
-	// /idp-style OIDC prefix.
-	RootRegistrars []func(huma.API) `group:"root_registrars"`
+	// AdminRegistrars land on the admin Surface — a separate mux + Huma API
+	// the serve command binds to its own private listener. admin/ contributes
+	// the /admin/keys handler this way so there is no path from the public
+	// surface to admin handlers.
+	AdminRegistrars []func(huma.API) `group:"admin_registrars"`
 }
 
-func newResult(p resultParams) *Result {
+func newServers(p serversParams) *Servers {
 	opts := []Option{
 		WithBasePath(p.OIDCBasePath),
 		WithWellKnown(p.Keys, p.OIDCIssuer),
@@ -36,8 +36,8 @@ func newResult(p resultParams) *Result {
 	for _, r := range p.Registrars {
 		opts = append(opts, WithRegistrar(r))
 	}
-	for _, r := range p.RootRegistrars {
-		opts = append(opts, WithRootRegistrar(r))
+	for _, r := range p.AdminRegistrars {
+		opts = append(opts, WithAdminRegistrar(r))
 	}
 	return New(p.Readiness, opts...)
 }
@@ -53,6 +53,6 @@ func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(NewReadiness),
 		fx.Provide(keysAsJWKSSource),
-		fx.Provide(newResult),
+		fx.Provide(newServers),
 	)
 }

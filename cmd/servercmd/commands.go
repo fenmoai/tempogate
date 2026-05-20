@@ -10,13 +10,14 @@ func asCommand(constructor any) any {
 	return fx.Annotate(constructor, fx.ResultTags(`group:"commands"`))
 }
 
-// Fx contributes the server-bound subcommands (serve, migrate, keys) into the
-// cobra command group. Wired only by the full app assembly; absent from the
-// lean CLI build.
+// Fx contributes the server-bound subcommands (serve, migrate, keys, gen-oas)
+// into the cobra command group. Wired only by the full app assembly; absent
+// from the lean CLI build.
 func Fx() fx.Option {
 	return fx.Provide(
 		asCommand(newServeCmd),
 		asCommand(newMigrateCmd),
 		asCommand(newKeysCmd),
+		asCommand(newGenOASCmd),
 	)
 }

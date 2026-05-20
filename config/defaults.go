@@ -16,6 +16,12 @@ func defaultConfig() *Config {
 				Port: 8000,
 			},
 		},
+		Admin: AdminConfig{
+			Listener: xloadtype.Listener{
+				IP:   net.IPv4(127, 0, 0, 1),
+				Port: 8081,
+			},
+		},
 		State: StateConfig{
 			Sqlite: SqliteConfig{
 				Path:        "/var/lib/tempogate/state.db",

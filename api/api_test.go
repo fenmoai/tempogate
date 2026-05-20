@@ -16,7 +16,7 @@ import (
 func newTestServer(t *testing.T, r *api.Readiness) (*httptest.Server, func()) {
 	t.Helper()
 	res := api.New(r)
-	srv := httptest.NewServer(res.Handler)
+	srv := httptest.NewServer(res.Public.Handler)
 	return srv, srv.Close
 }
 

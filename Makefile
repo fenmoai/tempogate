@@ -112,8 +112,9 @@ test-e2e: test-e2e-images test-e2e-go ## build images + run the Web UI SSO + CLI
 ci: check lint test-run ## fmt/vet/imports + lint + tests (used by GitHub Actions)
 	@go tool cover -func=coverage.out | tail -1
 
-gen-oas: build ## emit OpenAPI spec (subcommand not yet implemented)
+gen-oas: build ## emit OpenAPI specs for both the public and admin surfaces
 	$(BIN) gen-oas -f yaml > api/openapi.yaml
+	$(BIN) gen-oas --admin -f yaml > api/openapi.admin.yaml
 
 tools: gci golangci-lint ## install pinned dev tools into $(BIN_DIR)
 

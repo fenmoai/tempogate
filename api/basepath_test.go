@@ -24,11 +24,11 @@ func newKeys(t *testing.T) *keys.Keys {
 	return k
 }
 
-// serveAt binds an httptest server, then constructs the API with an issuer that
-// embeds basePath, mirroring real deployment (the discovery doc's issuer must
-// equal the URL relying parties fetch it from). Extra Options let individual
-// tests add registrars (e.g. a root-only fixture for admin-style endpoints).
-func serveAt(t *testing.T, basePath string, extra ...api.Option) (*httptest.Server, string) {
+// servePublic binds an httptest server to the *public* Surface, then constructs
+// the API with an issuer that embeds basePath, mirroring real deployment (the
+// discovery doc's issuer must equal the URL relying parties fetch it from).
+// Extra Options let individual tests add registrars (e.g. an admin fixture).
+func servePublic(t *testing.T, basePath string, extra ...api.Option) (*httptest.Server, *api.Servers, string) {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(nil)
 	issuer := "http://" + srv.Listener.Addr().String() + basePath
@@ -38,15 +38,15 @@ func serveAt(t *testing.T, basePath string, extra ...api.Option) (*httptest.Serv
 	}
 	opts = append(opts, extra...)
 	res := api.New(api.NewReadiness(), opts...)
-	srv.Config.Handler = res.Handler
+	srv.Config.Handler = res.Public.Handler
 	srv.Start()
 	t.Cleanup(srv.Close)
-	return srv, issuer
+	return srv, res, issuer
 }
 
 // adminProbe is a test-only Huma registrar standing in for the real admin
-// registrar: it registers a single `GET /admin/probe` so the basepath suite
-// can assert mount location without depending on the admin package (an
+// registrar: it registers a single `GET /admin/probe` so the surface-split
+// tests can assert location without depending on the admin package (an
 // import would cycle: admin → state/sqlite → … and api wires admin's
 // registrars in production via the same Option machinery exercised here).
 func adminProbe(a huma.API) {
@@ -69,11 +69,12 @@ func adminProbe(a huma.API) {
 }
 
 // TestBasePathMode: with a non-empty base path the OIDC surface is served
-// under it, the discovery doc advertises issuer-relative (prefixed) endpoints,
-// and /healthz / /readyz stay at root (k8s-probe-only, never path-routed).
+// under it on the public listener, the discovery doc advertises
+// issuer-relative (prefixed) endpoints, and /healthz / /readyz stay at root
+// (k8s-probe-only, never path-routed).
 func TestBasePathMode(t *testing.T) {
 	t.Parallel()
-	srv, issuer := serveAt(t, "/idp")
+	srv, _, issuer := servePublic(t, "/idp")
 
 	code, body := get(t, srv.URL+"/idp/.well-known/openid-configuration")
 	require.Equal(t, http.StatusOK, code)
@@ -105,10 +106,11 @@ func TestBasePathMode(t *testing.T) {
 }
 
 // TestRootModeUnchanged: an empty base path is byte-identical to today —
-// OIDC + health both at root (regression guard for existing deployments).
+// OIDC + health both at root on the public listener (regression guard for
+// existing deployments).
 func TestRootModeUnchanged(t *testing.T) {
 	t.Parallel()
-	srv, issuer := serveAt(t, "")
+	srv, _, issuer := servePublic(t, "")
 
 	code, body := get(t, srv.URL+"/.well-known/openid-configuration")
 	require.Equal(t, http.StatusOK, code)
@@ -124,41 +126,35 @@ func TestRootModeUnchanged(t *testing.T) {
 	assert.Equal(t, http.StatusOK, hc)
 }
 
-// TestRootRegistrarStaysAtRootUnderBasePath locks the admin contract:
-// routes registered via WithRootRegistrar are always served at the root,
-// regardless of OIDC base path. In base-path mode this means /admin/probe
-// answers and /idp/admin/probe must 404 — the OIDC prefix MUST NOT shadow
-// the admin surface, which a future commit will move to a private listener
-// where any path overlap with OIDC would be a deployment hazard.
-func TestRootRegistrarStaysAtRootUnderBasePath(t *testing.T) {
+// TestAdminSurfaceIsolatedFromPublic locks the structural-isolation contract:
+// a route added via WithAdminRegistrar is reachable only on the admin Surface
+// and the public Surface mux has no entry for it at all. Holds in both root
+// and base-path modes — the public mux being "small" is what makes 404 a
+// structural property and not a middleware decision.
+func TestAdminSurfaceIsolatedFromPublic(t *testing.T) {
 	t.Parallel()
-	srv, _ := serveAt(t, "/idp", api.WithRootRegistrar(adminProbe))
+	for _, basePath := range []string{"", "/idp"} {
+		t.Run("basePath="+basePath, func(t *testing.T) {
+			t.Parallel()
+			publicSrv, servers, _ := servePublic(t, basePath, api.WithAdminRegistrar(adminProbe))
 
-	code, _ := get(t, srv.URL+"/admin/probe")
-	assert.Equal(t, http.StatusOK, code, "/admin/* must answer at root in base-path mode")
+			// Public listener has no admin handlers: any /admin/* request 404s.
+			code, _ := get(t, publicSrv.URL+"/admin/probe")
+			assert.Equal(t, http.StatusNotFound, code,
+				"public listener must not expose /admin/* (no handler entry, not a middleware decision)")
+			prefixed, _ := get(t, publicSrv.URL+basePath+"/admin/probe")
+			assert.Equal(t, http.StatusNotFound, prefixed,
+				"public listener must not expose /admin/* under the OIDC base path either")
 
-	prefixed, _ := get(t, srv.URL+"/idp/admin/probe")
-	assert.Equal(t, http.StatusNotFound, prefixed,
-		"/admin/* must NOT be reachable under the OIDC base path")
+			// Admin Surface, bound to its own httptest server, answers.
+			adminSrv := httptest.NewServer(servers.Admin.Handler)
+			t.Cleanup(adminSrv.Close)
+			ac, _ := get(t, adminSrv.URL+"/admin/probe")
+			assert.Equal(t, http.StatusOK, ac, "admin listener serves /admin/probe")
 
-	// And the OIDC surface is unaffected by adding a root registrar.
-	hc, _ := get(t, srv.URL+"/idp/.well-known/openid-configuration")
-	assert.Equal(t, http.StatusOK, hc, "OIDC surface still serves under its prefix")
-}
-
-// TestRootRegistrarServesAtRootInRootMode: with no base path everything is
-// already at root; the WithRootRegistrar option must still work and not
-// double-register.
-func TestRootRegistrarServesAtRootInRootMode(t *testing.T) {
-	t.Parallel()
-	srv, _ := serveAt(t, "", api.WithRootRegistrar(adminProbe))
-
-	code, _ := get(t, srv.URL+"/admin/probe")
-	assert.Equal(t, http.StatusOK, code)
-
-	// Health and OIDC keep working — root registrar is additive.
-	hc, _ := get(t, srv.URL+"/healthz")
-	assert.Equal(t, http.StatusOK, hc)
-	oc, _ := get(t, srv.URL+"/.well-known/openid-configuration")
-	assert.Equal(t, http.StatusOK, oc)
+			// And the admin surface's own liveness probe.
+			hc, _ := get(t, adminSrv.URL+"/admin/healthz")
+			assert.Equal(t, http.StatusOK, hc, "admin listener serves /admin/healthz")
+		})
+	}
 }
