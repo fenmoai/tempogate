@@ -14,36 +14,35 @@ package admin
 
 import (
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/fenmoai/tempogate/perms"
 )
 
-// Role enumerates the namespace-scoped permissions tempogate can stamp on an
-// integration-key JWT. The string values are stable because they are
-// concatenated into the `permissions` claim that Temporal's default
-// ClaimMapper consumes ("<namespace>:<role>"): changing one would silently
-// reshape authz for every key already in circulation.
-type Role string
+// Role aliases perms.Role so admin-package callers keep using the local
+// name (admin.Role, admin.RoleAdmin, …) while the canonical definition
+// lives in perms — the shared package the OIDC /token endpoint also
+// consumes. An alias is enough: the underlying type is identical, so a
+// value built with admin.RoleAdmin satisfies perms.Role anywhere a
+// perms.Grant or perms.AddNamespace call is constructed.
+type Role = perms.Role
 
 const (
-	RoleRead   Role = "read"
-	RoleWrite  Role = "write"
-	RoleWorker Role = "worker"
-	RoleAdmin  Role = "admin"
+	RoleRead   = perms.RoleRead
+	RoleWrite  = perms.RoleWrite
+	RoleWorker = perms.RoleWorker
+	RoleAdmin  = perms.RoleAdmin
 )
-
-var validRoles = map[Role]struct{}{
-	RoleRead:   {},
-	RoleWrite:  {},
-	RoleWorker: {},
-	RoleAdmin:  {},
-}
 
 // ErrInvalidRole, ErrEmptyNamespace, ErrEmptyOwner are the sentinels Validate
 // returns. They are exported so handlers can map each to a precise 400
 // response and so the sqlite layer (which never receives user input directly)
-// can stay free of validation concerns.
+// can stay free of validation concerns. ErrInvalidRole wraps perms.ErrInvalidRole
+// so callers that already errors.Is against the perms-side sentinel keep
+// working as the two packages converge.
 var (
-	ErrInvalidRole    = errors.New("admin: role must be one of read/write/worker/admin")
+	ErrInvalidRole    = fmt.Errorf("admin: %w", perms.ErrInvalidRole)
 	ErrEmptyNamespace = errors.New("admin: namespace is required")
 	ErrEmptyOwner     = errors.New("admin: owner is required")
 )
@@ -105,19 +104,18 @@ func (k *IntegrationKey) Validate() error {
 	if k.Owner == "" {
 		return ErrEmptyOwner
 	}
-	if _, ok := validRoles[k.Role]; !ok {
+	if !k.Role.Valid() {
 		return ErrInvalidRole
 	}
 	return nil
 }
 
-// Permission returns the single string this key contributes to the JWT's
-// `permissions` claim. Temporal's default ClaimMapper reads
-// "<namespace>:<action>" entries: a key scoped to namespace `payments` and
-// role `worker` therefore lands in the JWT as `payments:worker`. Returning a
-// single string (not a slice) keeps the claim shape deliberate at the call
-// site — the POST handler wraps this in a one-element []string when calling
-// Signer.Mint.
-func (k *IntegrationKey) Permission() string {
-	return k.Namespace + ":" + string(k.Role)
+// Grant builds the perms.Grant this key contributes to the JWT's
+// `permissions` claim. Returning a Grant rather than a single
+// "<ns>:<role>" string keeps the claim shape uniform with the OIDC
+// /token path: both callers feed perms.Grant.ToClaim() into
+// keys.MintRequest.Permissions, and perms is the only place that owns
+// the wire-format mapping.
+func (k *IntegrationKey) Grant() *perms.Grant {
+	return perms.New(perms.AddNamespace(k.Namespace, k.Role))
 }

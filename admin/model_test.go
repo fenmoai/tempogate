@@ -106,12 +106,16 @@ func (s *ModelSuite) TestValidate() {
 	}
 }
 
-func (s *ModelSuite) TestPermissionConcatsNamespaceAndRole() {
+func (s *ModelSuite) TestGrantSerializesToSingleNamespaceRoleEntry() {
 	k := New(WithNamespace("payments"), WithRole(RoleWorker), WithOwner("svc"))
-	s.Equal("payments:worker", k.Permission())
+	s.Equal([]string{"payments:worker"}, k.Grant().ToClaim())
 }
 
-func (s *ModelSuite) TestPermissionStringConversionIsLiteral() {
+func (s *ModelSuite) TestGrantSystemNamespaceRoundTrip() {
+	// The "temporal-system" namespace is the default ClaimMapper's
+	// cluster-wide hook; an integration key minted against it should
+	// land in the JWT as `temporal-system:admin` so the verifier puts
+	// the role into claims.System rather than claims.Namespaces.
 	k := New(WithNamespace("temporal-system"), WithRole(RoleAdmin), WithOwner("svc"))
-	s.Equal("temporal-system:admin", k.Permission())
+	s.Equal([]string{"temporal-system:admin"}, k.Grant().ToClaim())
 }

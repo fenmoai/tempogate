@@ -254,7 +254,7 @@ func (h *Keys) create(ctx context.Context, in *createInput) (*createOutput, erro
 
 	signed, jti, err := h.signer.Mint(ctx, keys.MintRequest{
 		Subject:     k.Owner,
-		Permissions: []string{k.Permission()},
+		Permissions: k.Grant().ToClaim(),
 		TTL:         ttl,
 	})
 	if err != nil {
