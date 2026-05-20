@@ -130,6 +130,12 @@ func (s *Store) ListIntegrationKeys(ctx context.Context, f admin.ListFilter) ([]
 // same value the first one did. An unknown id reports
 // ErrIntegrationKeyNotFound, distinguishing "never existed" from "already
 // revoked".
+//
+// The same transaction also writes the jti into jti_denylist (INSERT OR
+// IGNORE, since a second revoke must remain a no-op). Both rows live or die
+// together: a crash between the two would otherwise leave the verifier
+// accepting a token whose integration-key row says revoked, or rejecting a
+// token whose row says active.
 func (s *Store) MarkIntegrationKeyRevoked(ctx context.Context, id string) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -155,6 +161,14 @@ func (s *Store) MarkIntegrationKeyRevoked(ctx context.Context, id string) (strin
 		id,
 	); err != nil {
 		return "", fmt.Errorf("sqlite: mark revoked update: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO jti_denylist (jti, revoked_at)
+		 VALUES (?, CURRENT_TIMESTAMP)`,
+		jti,
+	); err != nil {
+		return "", fmt.Errorf("sqlite: mark revoked denylist insert: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

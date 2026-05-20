@@ -143,6 +143,69 @@ func (s *KeysIntegrationSuite) TestPostedJWTVerifiesAgainstSameJWKS() {
 	s.Equal(row.JTI, jti)
 }
 
+func (s *KeysIntegrationSuite) TestRevokeMakesVerifierRejectWithinCacheTTL() {
+	// After DELETE /admin/keys/:id, a subsequent tempogate-mediated verify
+	// of the just-revoked JWT must fail. This suite wires the real sqlite
+	// store and the real denylist cache so the assertion exercises the
+	// full DELETE → tx-write-to-jti_denylist → cache.Hydrate →
+	// Verify(ErrTokenRevoked) chain end-to-end.
+	cache := keys.NewDenylistCache(keys.WithDenylistChecker(s.store))
+	registry := newAdminKeyRegistryViaPublicSurface(s.store)
+	h := admin.NewKeys(registry, s.signer, admin.WithDenylistHydrator(cache))
+
+	mux := http.NewServeMux()
+	h.Register(humago.New(mux, huma.DefaultConfig("test", "0.0.0")))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	guardedVerifier := keys.NewVerifier(
+		keys.WithKeys(s.keys),
+		keys.WithIssuer(testIssuer),
+		keys.WithDenylist(cache),
+	)
+
+	// Mint
+	body := postBody{Namespace: "payments", Role: "worker", Owner: "svc-recon"}
+	raw, err := json.Marshal(body)
+	s.Require().NoError(err)
+	resp, err := http.Post(srv.URL+"/admin/keys", "application/json", strings.NewReader(string(raw)))
+	s.Require().NoError(err)
+	defer func() { _ = resp.Body.Close() }()
+	s.Require().Equal(http.StatusCreated, resp.StatusCode)
+	respRaw, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	var got postResp
+	s.Require().NoError(json.Unmarshal(respRaw, &got))
+
+	// Pre-revoke: verify succeeds.
+	_, err = guardedVerifier.Verify(s.ctx, got.JWT)
+	s.Require().NoError(err)
+
+	// Revoke
+	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/admin/keys/"+got.ID, http.NoBody)
+	s.Require().NoError(err)
+	delResp, err := http.DefaultClient.Do(req)
+	s.Require().NoError(err)
+	defer func() { _ = delResp.Body.Close() }()
+	s.Require().Equal(http.StatusNoContent, delResp.StatusCode)
+
+	// Post-revoke: the same verifier (with the same cache that DELETE just
+	// hydrated) now rejects with ErrTokenRevoked — no TTL sleep required.
+	_, err = guardedVerifier.Verify(s.ctx, got.JWT)
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, keys.ErrTokenRevoked)
+
+	// Sanity: a fresh verifier built over the same JWKS but no denylist
+	// still accepts the revoked token, mirroring how Temporal's frontend
+	// will behave until its exp fires.
+	jwksOnly := keys.NewVerifier(
+		keys.WithKeys(s.keys),
+		keys.WithIssuer(testIssuer),
+	)
+	_, err = jwksOnly.Verify(s.ctx, got.JWT)
+	s.Require().NoError(err, "Temporal-style verifier (no denylist) must still accept the revoked token")
+}
+
 func (s *KeysIntegrationSuite) TestPostedJWTCarriesExpClaimWhenExpiresAtSet() {
 	expIn := 4 * time.Hour
 	exp := time.Now().UTC().Add(expIn).Truncate(time.Second)

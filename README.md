@@ -74,6 +74,30 @@ cluster-level access (`temporal-system:admin`), the value Temporal's default
 ClaimMapper needs for cluster APIs. Group- or role-derived per-namespace
 scoping and an admin API for long-lived integration keys are planned.
 
+### Revoking integration keys
+
+`DELETE /admin/keys/:id` marks a key revoked and adds its `jti` to a
+SQLite-backed denylist. The denylist is consulted by tempogate's *own*
+verifier (refresh-token exchange, `/userinfo`) through a 30 s read-through
+cache, so a revoke takes effect on those flows within 30 s on a single
+instance, and is hydrated synchronously in-process for the instance that
+served the DELETE.
+
+Temporal's frontend, however, validates JWTs with its default
+`ClaimMapper` against `/.well-known/jwks.json` only — it has no hook to
+consult a per-issuer denylist. The practical consequence:
+
+| Verification path                   | Time until revoke takes effect       |
+| ----------------------------------- | ------------------------------------ |
+| tempogate (refresh, `/userinfo`)    | up to **30 s** (denylist cache TTL)  |
+| Temporal frontend gRPC              | up to the **token's `exp`** lifetime |
+
+This is the acknowledged trade-off of stateless JWTs against Temporal's
+stock verifier. Mint integration keys with a deliberately bounded `exp` if
+your threat model needs an upper bound on revoke lag for Temporal gRPC; a
+future move to opaque, server-introspected keys would close the gap
+end-to-end.
+
 New here? [docs/getting-started.md](docs/getting-started.md) takes you from
 nothing to a working Web-UI SSO + CLI token in under ten minutes, with no
 Google account required (a bundled mock IdP stands in).

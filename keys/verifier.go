@@ -15,16 +15,30 @@ import (
 // no public keys to verify against.
 var ErrNoVerificationKeys = errors.New("keys: verifier has no keys to verify against")
 
+// ErrTokenRevoked is returned by Verify when the configured denylist reports
+// the token's jti as revoked. Verifier callers (refresh exchange, /userinfo)
+// map this to the same 401 they emit for any other invalid token; the
+// distinct sentinel exists so future audit paths can log revocations apart
+// from signature/expiry failures.
+var ErrTokenRevoked = errors.New("keys: token has been revoked")
+
 // Verifier validates tempogate-issued JWTs for tempogate's own needs (e.g.
 // exchanging a refresh token). Temporal's gRPC frontend does not use this — it
 // runs its own JWKS-backed verifier against /.well-known/jwks.json. Verifier
 // exists so the parts of tempogate that consume their own tokens don't
 // re-implement signature + claim checks inconsistently with the Signer.
+//
+// When a DenylistChecker is configured via WithDenylist, Verify rejects a
+// signature-and-claims-valid token whose jti has been revoked. Temporal's
+// frontend has no equivalent hook, so a revoked integration key keeps
+// authorizing Temporal gRPC calls until its exp fires; tempogate-mediated
+// flows (refresh, /userinfo) honor the denylist within the cache's TTL.
 type Verifier struct {
 	keys     *Keys
 	issuer   string
 	audience string
 	now      func() time.Time
+	denylist DenylistChecker
 }
 
 func NewVerifier(opts ...TokenOption) *Verifier {
@@ -34,6 +48,7 @@ func NewVerifier(opts ...TokenOption) *Verifier {
 		issuer:   c.issuer,
 		audience: c.audience,
 		now:      c.now,
+		denylist: c.denylist,
 	}
 }
 
@@ -42,9 +57,15 @@ func NewVerifier(opts ...TokenOption) *Verifier {
 // retained) and enforces the temporal claims plus the configured iss/aud. It
 // returns the parsed token so callers can read sub/permissions/jti.
 //
+// When a DenylistChecker is wired, the parsed token's jti is also consulted
+// against it: a revoked jti yields ErrTokenRevoked. A jti-less token (older
+// or hand-crafted) skips the check — the project mints UUIDv7 jti on every
+// token, so absence is treated as a non-tempogate token rather than as an
+// implicit revoke.
+//
 // ctx mirrors Signer.Mint for symmetry; verification is synchronous against
 // the in-memory key cache.
-func (v *Verifier) Verify(_ context.Context, raw string) (jwt.Token, error) {
+func (v *Verifier) Verify(ctx context.Context, raw string) (jwt.Token, error) {
 	if v.keys == nil {
 		return nil, ErrNoVerificationKeys
 	}
@@ -83,6 +104,18 @@ func (v *Verifier) Verify(_ context.Context, raw string) (jwt.Token, error) {
 	tok, err := jwt.Parse([]byte(raw), parseOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("keys: verify token: %w", err)
+	}
+
+	if v.denylist != nil {
+		if jti, ok := tok.JwtID(); ok && jti != "" {
+			revoked, err := v.denylist.IsRevoked(ctx, jti)
+			if err != nil {
+				return nil, fmt.Errorf("keys: check denylist: %w", err)
+			}
+			if revoked {
+				return nil, ErrTokenRevoked
+			}
+		}
 	}
 	return tok, nil
 }

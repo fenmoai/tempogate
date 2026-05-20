@@ -31,12 +31,15 @@ const (
 
 // tokenConfig is the shared construction state for Signer and Verifier: both
 // agree on the issuer/audience pair and read keypairs from the same *Keys, so
-// a single functional-option set keeps the two halves from drifting.
+// a single functional-option set keeps the two halves from drifting. The
+// denylist field is verifier-only — Signer ignores it — but lives here so
+// WithDenylist composes with the other TokenOptions at one call site.
 type tokenConfig struct {
 	keys     *Keys
 	issuer   string
 	audience string
 	now      func() time.Time
+	denylist DenylistChecker
 }
 
 // TokenOption configures a Signer or a Verifier. It is distinct from the
@@ -71,6 +74,15 @@ func WithAudience(aud string) TokenOption {
 // (when a keypair was created vs. when a token was issued).
 func WithTokenClock(now func() time.Time) TokenOption {
 	return func(c *tokenConfig) { c.now = now }
+}
+
+// WithDenylist plugs a jti-revocation check into the Verifier hot path. A
+// signature-and-claims-valid token whose jti the checker reports as revoked
+// is rejected with ErrTokenRevoked. The option is a no-op for Signer; pass
+// the cache returned by NewDenylistCache rather than a raw store so the
+// hot-path lookup is amortized across the cache TTL.
+func WithDenylist(d DenylistChecker) TokenOption {
+	return func(c *tokenConfig) { c.denylist = d }
 }
 
 func newTokenConfig(opts ...TokenOption) tokenConfig {

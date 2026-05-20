@@ -47,3 +47,13 @@ type KeyRegistry interface {
 	List(ctx context.Context, f ListFilter) ([]IntegrationKey, error)
 	MarkRevoked(ctx context.Context, id string) (jti string, err error)
 }
+
+// DenylistHydrator pushes a freshly-revoked jti into any in-process verifier
+// cache so the next /userinfo or refresh-token call rejects the revoked
+// token immediately rather than waiting for the cache TTL to expire. The
+// production wiring satisfies this with *keys.DenylistCache.Hydrate; tests
+// can pass nil to skip cache hydration (storage alone is sufficient for the
+// revoke-takes-effect-eventually contract).
+type DenylistHydrator interface {
+	Hydrate(jti string)
+}

@@ -33,7 +33,8 @@ func newSigner(p signerParams) *Signer {
 type verifierParams struct {
 	fx.In
 
-	Keys *Keys
+	Keys     *Keys
+	Denylist *DenylistCache
 
 	Issuer string `name:"oidc_issuer"`
 }
@@ -41,19 +42,39 @@ type verifierParams struct {
 // newVerifier wires the Verifier tempogate uses to validate its own tokens
 // (the /userinfo bearer check, refresh-token exchange). Its issuer must match
 // newSigner's so a token this process mints verifies in the same process;
-// audience is unset for the same reason it is on the Signer.
+// audience is unset for the same reason it is on the Signer. The denylist
+// cache is consulted on every verify so a revoked integration key stops
+// authorizing tempogate-mediated flows within the cache's TTL.
 func newVerifier(p verifierParams) *Verifier {
-	return NewVerifier(WithKeys(p.Keys), WithIssuer(p.Issuer))
+	return NewVerifier(
+		WithKeys(p.Keys),
+		WithIssuer(p.Issuer),
+		WithDenylist(p.Denylist),
+	)
 }
 
-// Fx wires *Keys plus the *Signer and *Verifier over it into the composition
-// root. The KeyStore dependency is satisfied by state/sqlite via
-// fx.Annotate(..., fx.As(new(keys.KeyStore))); oidc_issuer is contributed by
-// config.
+type denylistParams struct {
+	fx.In
+
+	Checker DenylistChecker
+}
+
+// newDenylistCache wraps the sqlite-backed DenylistChecker (provided by
+// state/sqlite via fx.As) in the verifier-side read-through cache.
+// DefaultDenylistTTL governs how stale a hot-path "active" answer can be.
+func newDenylistCache(p denylistParams) *DenylistCache {
+	return NewDenylistCache(WithDenylistChecker(p.Checker))
+}
+
+// Fx wires *Keys plus the *Signer, *Verifier, and verifier-side
+// *DenylistCache over it into the composition root. The KeyStore and
+// DenylistChecker dependencies are both satisfied by state/sqlite via
+// fx.Annotate(..., fx.As(...)); oidc_issuer is contributed by config.
 func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(newFx),
 		fx.Provide(newSigner),
+		fx.Provide(newDenylistCache),
 		fx.Provide(newVerifier),
 	)
 }

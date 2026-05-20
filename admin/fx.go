@@ -12,6 +12,12 @@ type keysParams struct {
 
 	Registry KeyRegistry
 	Signer   *keys.Signer
+	// DenylistCache is the verifier-side cache the DELETE handler nudges
+	// after a successful revoke so the in-process Verifier rejects the
+	// freshly-revoked token without waiting for its TTL to expire. Injected
+	// by exact type from keys.Fx; *keys.DenylistCache satisfies the
+	// admin.DenylistHydrator interface structurally.
+	DenylistCache *keys.DenylistCache
 }
 
 // newKeysRegistrar builds the /admin/keys handler over the KeyRegistry
@@ -21,7 +27,7 @@ type keysParams struct {
 // the admin Surface only — a separate mux + Huma API the serve command binds
 // to its own private listener.
 func newKeysRegistrar(p keysParams) func(huma.API) {
-	h := NewKeys(p.Registry, p.Signer)
+	h := NewKeys(p.Registry, p.Signer, WithDenylistHydrator(p.DenylistCache))
 	return h.Register
 }
 
