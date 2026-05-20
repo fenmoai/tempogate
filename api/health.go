@@ -26,6 +26,26 @@ type readyOutput struct {
 	Body readyBody
 }
 
+// registerAdminHealth mounts a liveness probe on the admin surface. There is
+// deliberately no readiness counterpart: the admin listener is private and
+// pinned to loopback by default, so it has no role in cluster traffic shaping.
+// The path is /admin/healthz (not /healthz) so an operator running curl by
+// hand against either listener can tell from the path which surface answered.
+func registerAdminHealth(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "admin-healthz",
+		Method:      http.MethodGet,
+		Path:        "/admin/healthz",
+		Summary:     "Admin liveness probe",
+		Tags:        []string{"admin"},
+	}, func(_ context.Context, _ *struct{}) (*healthOutput, error) {
+		return &healthOutput{Body: healthBody{
+			Status:  "ok",
+			Version: buildinfo.Version(),
+		}}, nil
+	})
+}
+
 func registerHealth(api huma.API, readiness *Readiness) {
 	huma.Register(api, huma.Operation{
 		OperationID: "healthz",

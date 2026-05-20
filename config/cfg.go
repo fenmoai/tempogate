@@ -9,6 +9,7 @@ import (
 type Config struct {
 	Log   LogConfig   `env:",prefix=LOG__"`
 	HTTP  HTTPConfig  `env:",prefix=HTTP__"`
+	Admin AdminConfig `env:",prefix=ADMIN__"`
 	State StateConfig `env:",prefix=STATE__"`
 	OIDC  OIDCConfig  `env:",prefix=OIDC__"`
 }
@@ -18,6 +19,15 @@ type LogConfig struct {
 }
 
 type HTTPConfig struct {
+	Listener xloadtype.Listener `env:"LISTENER"`
+}
+
+// AdminConfig configures the private admin listener. It is intentionally a
+// separate bind from HTTPConfig: the admin Huma API is mounted on its own
+// http.Server so the public listener never has handlers for /admin/*. Defaults
+// to a loopback bind so a mis-deployment fails closed (admin unreachable from
+// the pod's service IP unless explicitly opted into a cluster-internal bind).
+type AdminConfig struct {
 	Listener xloadtype.Listener `env:"LISTENER"`
 }
 

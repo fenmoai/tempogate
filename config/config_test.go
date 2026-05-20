@@ -33,6 +33,12 @@ func (s *ConfigSuite) TestNew() {
 						Port: 8000,
 					},
 				},
+				Admin: AdminConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8081,
+					},
+				},
 				State: StateConfig{
 					Sqlite: SqliteConfig{
 						Path:        "/var/lib/tempogate/state.db",
@@ -62,6 +68,48 @@ func (s *ConfigSuite) TestNew() {
 					Listener: xloadtype.Listener{
 						IP:   net.IPv4(0, 0, 0, 0),
 						Port: 9000,
+					},
+				},
+				Admin: AdminConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8081,
+					},
+				},
+				State: StateConfig{
+					Sqlite: SqliteConfig{
+						Path:        "/var/lib/tempogate/state.db",
+						MaxConns:    1,
+						BusyTimeout: 5 * time.Second,
+					},
+				},
+				OIDC: OIDCConfig{
+					Issuer: "http://127.0.0.1:8000",
+					Google: GoogleConfig{
+						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
+						TokenEndpoint: "https://oauth2.googleapis.com/token",
+						IssuerURL:     "https://accounts.google.com",
+					},
+				},
+			},
+		},
+		{
+			name: "admin listener overridden by env",
+			env: map[string]string{
+				"ADMIN__LISTENER": "127.0.0.1:9091",
+			},
+			want: &Config{
+				Log: LogConfig{Level: "info"},
+				HTTP: HTTPConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8000,
+					},
+				},
+				Admin: AdminConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 9091,
 					},
 				},
 				State: StateConfig{
@@ -96,6 +144,12 @@ func (s *ConfigSuite) TestNew() {
 						Port: 8000,
 					},
 				},
+				Admin: AdminConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8081,
+					},
+				},
 				State: StateConfig{
 					Sqlite: SqliteConfig{
 						Path:        "/tmp/tempogate.db",
@@ -124,6 +178,12 @@ func (s *ConfigSuite) TestNew() {
 					Listener: xloadtype.Listener{
 						IP:   net.IPv4(127, 0, 0, 1),
 						Port: 8000,
+					},
+				},
+				Admin: AdminConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8081,
 					},
 				},
 				State: StateConfig{
@@ -156,6 +216,12 @@ func (s *ConfigSuite) TestNew() {
 					Listener: xloadtype.Listener{
 						IP:   net.IPv4(127, 0, 0, 1),
 						Port: 8000,
+					},
+				},
+				Admin: AdminConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8081,
 					},
 				},
 				State: StateConfig{
@@ -191,6 +257,12 @@ func (s *ConfigSuite) TestNew() {
 					Listener: xloadtype.Listener{
 						IP:   net.IPv4(127, 0, 0, 1),
 						Port: 8000,
+					},
+				},
+				Admin: AdminConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8081,
 					},
 				},
 				State: StateConfig{

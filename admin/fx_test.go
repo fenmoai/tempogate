@@ -19,11 +19,12 @@ import (
 )
 
 // FxSuite exercises admin.Fx() end-to-end: the graph must produce a registrar
-// into the api package's `root_registrars` group, and that registrar must
+// into the api package's `admin_registrars` group, and that registrar must
 // build over the sqlite-backed admin.KeyRegistry (via the shim adapter) plus
 // a Signer. This is what catches a future refactor that accidentally points
-// admin.Fx() at the wrong group (root vs api), since the assertion below
-// reads from `root_registrars` by name.
+// admin.Fx() at the wrong group (admin vs api), since the assertion below
+// reads from `admin_registrars` by name — wiring it into `api_registrars`
+// would also leak the /admin/keys handler onto the public listener.
 type FxSuite struct {
 	suite.Suite
 }
@@ -32,10 +33,10 @@ func TestFxSuite(t *testing.T) {
 	suite.Run(t, new(FxSuite))
 }
 
-func (s *FxSuite) TestFxProducesRootRegistrar() {
+func (s *FxSuite) TestFxProducesAdminRegistrar() {
 	var collected struct {
 		fx.In
-		RootRegistrars []func(huma.API) `group:"root_registrars"`
+		AdminRegistrars []func(huma.API) `group:"admin_registrars"`
 	}
 
 	dbPath := filepath.Join(s.T().TempDir(), "fx.db")
@@ -61,13 +62,13 @@ func (s *FxSuite) TestFxProducesRootRegistrar() {
 	)
 	app.RequireStart().RequireStop()
 
-	s.Require().Len(collected.RootRegistrars, 1,
-		"admin.Fx() must contribute exactly one registrar to root_registrars")
+	s.Require().Len(collected.AdminRegistrars, 1,
+		"admin.Fx() must contribute exactly one registrar to admin_registrars")
 
 	// Bind the produced registrar to a real Huma adapter so a future
 	// rename of admin.KeysPath surfaces here at the assertion step.
 	mux := http.NewServeMux()
-	collected.RootRegistrars[0](humago.New(mux, huma.DefaultConfig("test", "0.0.0")))
+	collected.AdminRegistrars[0](humago.New(mux, huma.DefaultConfig("test", "0.0.0")))
 }
 
 // fxFakeKeyStore is the minimal keys.KeyStore needed to bootstrap *keys.Keys

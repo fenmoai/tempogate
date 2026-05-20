@@ -67,7 +67,7 @@ func (s *WellKnownSuite) SetupTest() {
 	srv := httptest.NewUnstartedServer(nil)
 	s.issuer = "http://" + srv.Listener.Addr().String()
 	res := api.New(api.NewReadiness(), api.WithWellKnown(s.keys, s.issuer))
-	srv.Config.Handler = res.Handler
+	srv.Config.Handler = res.Public.Handler
 	srv.Start()
 	s.srv = srv
 }

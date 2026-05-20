@@ -17,9 +17,9 @@ import (
 )
 
 // TestFxWiresServerSubcommands proves Fx() (via asCommand) contributes serve,
-// migrate and keys into the "commands" value group the root dispatcher
-// collects — the integration the full app assembly relies on, and the reason
-// none of these subcommands appear in the lean build.
+// migrate, keys and gen-oas into the "commands" value group the root
+// dispatcher collects — the integration the full app assembly relies on, and
+// the reason none of these subcommands appear in the lean build.
 func TestFxWiresServerSubcommands(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	store, err := sqlite.New(sqlite.WithPath(path))
@@ -33,10 +33,14 @@ func TestFxWiresServerSubcommands(t *testing.T) {
 			func() *sqlite.Store { return store },
 			func() *keys.Keys { return keys.New(keys.WithStore(store)) },
 			api.NewReadiness,
-			func(r *api.Readiness) *api.Result { return api.New(r) },
+			func(r *api.Readiness) *api.Servers { return api.New(r) },
 			fx.Annotate(
 				func() xloadtype.Listener { return xloadtype.Listener{} },
 				fx.ResultTags(`name:"http"`),
+			),
+			fx.Annotate(
+				func() xloadtype.Listener { return xloadtype.Listener{} },
+				fx.ResultTags(`name:"admin"`),
 			),
 			fx.Annotate(
 				func() string { return path },
@@ -57,7 +61,7 @@ func TestFxWiresServerSubcommands(t *testing.T) {
 	for _, c := range cmds {
 		got[c.Name()] = true
 	}
-	for _, want := range []string{"serve", "migrate", "keys"} {
+	for _, want := range []string{"serve", "migrate", "keys", "gen-oas"} {
 		require.Truef(t, got[want], "Fx() must contribute %q into the commands group", want)
 	}
 }

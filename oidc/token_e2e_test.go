@@ -80,7 +80,7 @@ func (s *TokenE2ESuite) SetupTest() {
 		api.WithRegistrar(token.Register),
 		api.WithRegistrar(userinfo.Register),
 	)
-	s.srv = httptest.NewServer(result.Handler)
+	s.srv = httptest.NewServer(result.Public.Handler)
 	s.T().Cleanup(s.srv.Close)
 
 	s.client = &http.Client{

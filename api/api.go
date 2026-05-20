@@ -1,10 +1,19 @@
-// Package api is the public HTTP surface: /healthz, /readyz, and (via feature
-// registrars) the OIDC/JWKS endpoints.
+// Package api is tempogate's HTTP surface. It produces two structurally
+// isolated handler trees:
 //
-// By default everything is served at the root. With WithBasePath set (the path
-// component of OIDC__ISSUER), the OIDC surface is mounted under that prefix so
-// tempogate can be co-hosted on a shared hostname; /healthz and /readyz stay
-// at the root regardless — they are k8s-probe-only and never path-routed.
+//   - Public: /healthz, /readyz, and the OIDC + .well-known endpoints
+//     contributed by feature packages (oidc). The OIDC surface may move under
+//     a base path when one is set (OIDC__ISSUER's path component); health
+//     probes stay at the root regardless.
+//   - Admin: /admin/healthz plus the /admin/* endpoints contributed by the
+//     admin package. Lives on its own mux + Huma API so it can be bound to a
+//     separate http.Server listener; the public mux has no admin handlers at
+//     all and routes /admin/* to 404 as a property of having no entry, not as
+//     a middleware decision.
+//
+// Separation is structural: the two Surfaces never share a mux or a Huma API,
+// so generated OpenAPI specs split cleanly and no public-listener middleware
+// can be bypassed to reach an admin handler.
 package api
 
 import (
@@ -17,84 +26,88 @@ import (
 )
 
 type apiConfig struct {
-	// registrars are mounted on the OIDC-surface adapter, which moves under
-	// basePath when one is set. JWKS + discovery use this so the
-	// well-known URLs match the issuer in the discovery document.
+	// registrars land on the public Huma API. The OIDC surface (jwks +
+	// discovery + token/authorize/userinfo) moves under basePath when one
+	// is set so the discovery doc and the live routes stay in lockstep.
 	registrars []func(huma.API)
-	// rootRegistrars are always mounted at the root of the public listener
-	// regardless of basePath. The admin surface uses this so /admin/keys
-	// stays at root even when OIDC is path-prefixed under /idp; a future
-	// commit moves admin to its own private listener and any overlap with
-	// the OIDC prefix would be a deployment hazard.
-	rootRegistrars []func(huma.API)
-	basePath       string
+	// adminRegistrars land on the admin Huma API, which is mounted on a
+	// separate http.Handler from the public surface and meant for binding
+	// to a private listener.
+	adminRegistrars []func(huma.API)
+	basePath        string
 }
 
 type Option func(*apiConfig)
 
-// WithRegistrar lets feature modules (OIDC, JWKS) plug additional Huma route
-// registrations onto the OIDC-surface adapter — that surface moves under
-// basePath when one is set.
+// WithRegistrar contributes a Huma registrar to the public surface. The OIDC
+// feature uses this; the registered routes move under the OIDC base path when
+// one is configured.
 func WithRegistrar(fn func(huma.API)) Option {
 	return func(c *apiConfig) { c.registrars = append(c.registrars, fn) }
 }
 
-// WithRootRegistrar mounts a Huma registrar at the root regardless of
-// basePath. Use for surfaces that must never be shadowed by the OIDC
-// prefix — currently /admin/keys, which a follow-up will move off the
-// public listener entirely.
-func WithRootRegistrar(fn func(huma.API)) Option {
-	return func(c *apiConfig) { c.rootRegistrars = append(c.rootRegistrars, fn) }
+// WithAdminRegistrar contributes a Huma registrar to the admin surface. Routes
+// registered through it are reachable only on the admin handler / listener
+// and never appear in the public surface's mux or OpenAPI spec.
+func WithAdminRegistrar(fn func(huma.API)) Option {
+	return func(c *apiConfig) { c.adminRegistrars = append(c.adminRegistrars, fn) }
 }
 
 // WithBasePath mounts the OIDC surface under a URL path prefix — the path
 // component of OIDC__ISSUER (e.g. "/idp"). Health probes stay at the root.
-// Empty ⇒ root, the historical default (zero behavioural change).
+// Empty ⇒ root, the historical default.
 func WithBasePath(p string) Option {
 	return func(c *apiConfig) { c.basePath = p }
 }
 
-type Result struct {
+// Surface is one structurally isolated handler tree: a Huma API for OpenAPI
+// generation and the http.Handler that actually serves it. Prefix is the
+// URL prefix the API's routes are mounted under (empty unless basePath is
+// set on the public surface).
+type Surface struct {
 	API     huma.API
 	Handler http.Handler
 	Prefix  string
 }
 
-func New(readiness *Readiness, opts ...Option) *Result {
+// Servers is the pair of Surfaces tempogate listens on. The serve command
+// binds each to its own http.Server (and listener); a future-curious reader
+// can verify the isolation by greping for any path between Public and Admin —
+// there isn't one.
+type Servers struct {
+	Public *Surface
+	Admin  *Surface
+}
+
+func New(readiness *Readiness, opts ...Option) *Servers {
 	cfg := &apiConfig{}
 	for _, o := range opts {
 		o(cfg)
 	}
 
+	return &Servers{
+		Public: newPublic(readiness, cfg),
+		Admin:  newAdmin(cfg),
+	}
+}
+
+func newPublic(readiness *Readiness, cfg *apiConfig) *Surface {
 	mux := http.NewServeMux()
 
-	// Root mode: one adapter, every registrar at the root.
-	// Byte-identical to the original behaviour for every deployment that
-	// doesn't set a path — root registrars and OIDC registrars all land on
-	// the same adapter, since "root" and "basePath" are the same place.
+	// Root mode: one adapter, health + OIDC all at root.
 	if cfg.basePath == "" {
 		a := humago.NewWithPrefix(mux, "", huma.DefaultConfig("tempogate", buildinfo.Version()))
 		registerHealth(a, readiness)
-		for _, fn := range cfg.rootRegistrars {
-			fn(a)
-		}
 		for _, fn := range cfg.registrars {
 			fn(a)
 		}
-		return &Result{API: a, Handler: mux, Prefix: ""}
+		return &Surface{API: a, Handler: mux, Prefix: ""}
 	}
 
-	// Base-path mode: up to three adapters on one mux.
-	//   - healthAPI: root, probe-only (no OpenAPI/docs). Today serves
-	//     /healthz and /readyz; intentionally minimal so the root surface
-	//     stays an obvious "k8s probes only" target.
-	//   - rootAPI: root, full OpenAPI/docs — created only when at least one
-	//     root registrar is present, so callers without admin-style routes
-	//     pay no extra surface. Its OpenAPI spec describes the root-mounted
-	//     routes (e.g. /admin/keys); the OIDC spec stays under basePath.
-	//   - oidcAPI: basePath, full OpenAPI/docs. The OIDC surface mounts
-	//     natively under basePath so served routes, the discovery document,
-	//     and the iss claim stay in lockstep with no proxy StripPrefix.
+	// Base-path mode: a minimal health adapter at the root (no OpenAPI/docs
+	// surface — health is k8s-probe-only), and a full OIDC adapter under
+	// basePath so the discovery document, the iss claim, and the served
+	// routes stay in lockstep with no proxy StripPrefix.
 	healthCfg := huma.DefaultConfig("tempogate", buildinfo.Version())
 	healthCfg.OpenAPIPath = ""
 	healthCfg.DocsPath = ""
@@ -102,17 +115,20 @@ func New(readiness *Readiness, opts ...Option) *Result {
 	healthAPI := humago.NewWithPrefix(mux, "", healthCfg)
 	registerHealth(healthAPI, readiness)
 
-	if len(cfg.rootRegistrars) > 0 {
-		rootAPI := humago.NewWithPrefix(mux, "", huma.DefaultConfig("tempogate-root", buildinfo.Version()))
-		for _, fn := range cfg.rootRegistrars {
-			fn(rootAPI)
-		}
-	}
-
 	oidcAPI := humago.NewWithPrefix(mux, cfg.basePath, huma.DefaultConfig("tempogate", buildinfo.Version()))
 	for _, fn := range cfg.registrars {
 		fn(oidcAPI)
 	}
 
-	return &Result{API: oidcAPI, Handler: mux, Prefix: cfg.basePath}
+	return &Surface{API: oidcAPI, Handler: mux, Prefix: cfg.basePath}
+}
+
+func newAdmin(cfg *apiConfig) *Surface {
+	mux := http.NewServeMux()
+	a := humago.NewWithPrefix(mux, "", huma.DefaultConfig("tempogate-admin", buildinfo.Version()))
+	registerAdminHealth(a)
+	for _, fn := range cfg.adminRegistrars {
+		fn(a)
+	}
+	return &Surface{API: a, Handler: mux, Prefix: ""}
 }

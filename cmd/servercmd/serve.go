@@ -29,12 +29,13 @@ const readHeaderTimeout = 10 * time.Second
 type serveParams struct {
 	fx.In
 
-	Logger    *zap.Logger
-	Store     *sqlite.Store
-	Keys      *keys.Keys
-	API       *api.Result
-	Readiness *api.Readiness
-	Listener  xloadtype.Listener `name:"http"`
+	Logger        *zap.Logger
+	Store         *sqlite.Store
+	Keys          *keys.Keys
+	Servers       *api.Servers
+	Readiness     *api.Readiness
+	Listener      xloadtype.Listener `name:"http"`
+	AdminListener xloadtype.Listener `name:"admin"`
 }
 
 func newServeCmd(p serveParams) *cobra.Command {
@@ -51,38 +52,55 @@ func newServeCmd(p serveParams) *cobra.Command {
 				return err
 			}
 
-			// Load (or bootstrap) the signing keypair before the listener
+			// Load (or bootstrap) the signing keypair before either listener
 			// binds so /.well-known/jwks.json serves the active key from the
-			// first accepted request.
+			// first accepted request and the admin signer can mint integration
+			// JWTs.
 			if err := p.Keys.Init(ctx); err != nil {
 				return fmt.Errorf("keys init: %w", err)
 			}
 
-			// p.API.Handler already serves every route at its final path:
-			// health at the root, and the OIDC surface natively under the
-			// configured base path. Mount it as-is — a StripPrefix here would
-			// desync the served paths from the advertised endpoints / iss
-			// claim and silently break token validation.
-			mux := http.NewServeMux()
-			mux.Handle("/", p.API.Handler)
-
-			addr := p.Listener.String()
+			// Two http.Server instances, two muxes — the public listener
+			// literally has no /admin/* handler, so admin reachability is a
+			// property of binding, not of middleware. Both run under
+			// xrun.All so a failure on either tears down the process.
+			publicAddr := p.Listener.String()
+			adminAddr := p.AdminListener.String()
 			logger := p.Logger.Named("server")
+
+			publicMux := http.NewServeMux()
+			publicMux.Handle("/", p.Servers.Public.Handler)
+
+			adminMux := http.NewServeMux()
+			adminMux.Handle("/", p.Servers.Admin.Handler)
 
 			return xrun.All(
 				xrun.NoTimeout,
 				httpServer(httpServerOptions{
 					server: &http.Server{
-						Addr:              addr,
-						Handler:           mux,
+						Addr:              publicAddr,
+						Handler:           publicMux,
 						ReadHeaderTimeout: readHeaderTimeout,
 					},
 					onListening: func() {
-						logger.Info("starting http server", zap.String("addr", addr))
+						logger.Info("starting public http server", zap.String("addr", publicAddr))
 						p.Readiness.Mark()
 					},
 					onStopping: func() {
-						logger.Info("stopping http server", zap.String("addr", addr))
+						logger.Info("stopping public http server", zap.String("addr", publicAddr))
+					},
+				}),
+				httpServer(httpServerOptions{
+					server: &http.Server{
+						Addr:              adminAddr,
+						Handler:           adminMux,
+						ReadHeaderTimeout: readHeaderTimeout,
+					},
+					onListening: func() {
+						logger.Info("starting admin http server", zap.String("addr", adminAddr))
+					},
+					onStopping: func() {
+						logger.Info("stopping admin http server", zap.String("addr", adminAddr))
 					},
 				}),
 			).Run(ctx)
