@@ -17,8 +17,15 @@ type resultParams struct {
 
 	// Registrars are contributed by feature packages (e.g. oidc) into the
 	// shared group so they can append Huma operations without api importing
-	// them.
+	// them. They land on the OIDC-surface adapter, which moves under
+	// basePath when one is configured.
 	Registrars []func(huma.API) `group:"api_registrars"`
+
+	// RootRegistrars also avoid api importing the feature package, but they
+	// pin the registered routes to the listener root regardless of
+	// basePath. admin/ uses this so /admin/keys is never shadowed by a
+	// /idp-style OIDC prefix.
+	RootRegistrars []func(huma.API) `group:"root_registrars"`
 }
 
 func newResult(p resultParams) *Result {
@@ -28,6 +35,9 @@ func newResult(p resultParams) *Result {
 	}
 	for _, r := range p.Registrars {
 		opts = append(opts, WithRegistrar(r))
+	}
+	for _, r := range p.RootRegistrars {
+		opts = append(opts, WithRootRegistrar(r))
 	}
 	return New(p.Readiness, opts...)
 }

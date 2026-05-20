@@ -443,6 +443,24 @@ func (s *KeysSuite) TestListRejectsMalformedCursor() {
 	s.Equal(http.StatusBadRequest, resp.StatusCode)
 }
 
+func (s *KeysSuite) TestListClampsLimitToMax() {
+	// Seed a handful so the handler actually exercises the clamp path —
+	// limit=10_000 would have asked the store for 10_001 rows; the clamp
+	// drops it to 200+1, and the response succeeds.
+	for i := 0; i < 3; i++ {
+		resp, _ := s.postKey(postBody{Namespace: "ns", Role: "read", Owner: "o"})
+		s.Require().Equal(http.StatusCreated, resp.StatusCode)
+	}
+
+	resp, raw := s.listKeys("limit=10000")
+	s.Require().Equal(http.StatusOK, resp.StatusCode, "body=%s", string(raw))
+
+	var lst listResp
+	s.Require().NoError(json.Unmarshal(raw, &lst))
+	s.Len(lst.Items, 3)
+	s.Empty(lst.NextCursor)
+}
+
 func (s *KeysSuite) TestDeleteIdempotent() {
 	resp, raw := s.postKey(postBody{Namespace: "ns", Role: "read", Owner: "o"})
 	s.Require().Equal(http.StatusCreated, resp.StatusCode)
@@ -479,13 +497,7 @@ func (s *KeysSuite) TestStoreErrorBubblesUp() {
 	// Sanity: an unexpected (non-NotFound) error from the registry surfaces
 	// as 500 rather than being silently swallowed.
 	failing := &failingRegistry{wrapped: s.registry, byIDErr: errors.New("disk on fire")}
-	h := admin.NewKeys(failing, s.signer,
-		admin.WithClock(s.clock()),
-		admin.WithIDGenerator(s.nextID),
-	)
-	mux := http.NewServeMux()
-	h.Register(humago.New(mux, huma.DefaultConfig("test", "0.0.0")))
-	srv := httptest.NewServer(mux)
+	srv := s.handlerWith(failing, s.signer, admin.WithIDGenerator(s.nextID))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/admin/keys/" + uuid.NewString())
@@ -494,21 +506,143 @@ func (s *KeysSuite) TestStoreErrorBubblesUp() {
 	s.Equal(http.StatusInternalServerError, resp.StatusCode)
 }
 
+// handlerWith spins up a one-off httptest server around the admin handler
+// using the supplied registry/signer/options. Used by the error-path tests
+// that need a registry or signer different from the suite-wide one in
+// SetupTest without tearing the whole suite fixture down.
+func (s *KeysSuite) handlerWith(reg admin.KeyRegistry, signer *keys.Signer, extra ...admin.KeysOption) *httptest.Server {
+	opts := append([]admin.KeysOption{admin.WithClock(s.clock())}, extra...)
+	h := admin.NewKeys(reg, signer, opts...)
+	mux := http.NewServeMux()
+	h.Register(humago.New(mux, huma.DefaultConfig("test", "0.0.0")))
+	return httptest.NewServer(mux)
+}
+
+func (s *KeysSuite) doRequest(srv *httptest.Server, method, path string, body any) *http.Response {
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		s.Require().NoError(err)
+		reader = strings.NewReader(string(raw))
+	}
+	req, err := http.NewRequest(method, srv.URL+path, reader)
+	s.Require().NoError(err)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := s.client.Do(req)
+	s.Require().NoError(err)
+	return resp
+}
+
+func (s *KeysSuite) TestPostExpiresAtInPastRejected() {
+	past := s.now.Add(-time.Hour)
+	body := postBody{
+		Namespace: "ns",
+		Role:      "read",
+		Owner:     "o",
+		ExpiresAt: ptr(past.Format(time.RFC3339)),
+	}
+	resp, raw := s.postKey(body)
+	s.Equal(http.StatusBadRequest, resp.StatusCode, "body=%s", string(raw))
+}
+
+func (s *KeysSuite) TestPostSignerErrorBubblesUp500() {
+	// A Signer with no Keys returns ErrNoSigningKeys at Mint time — the
+	// handler must surface that as 500 (it is a real server problem, not a
+	// caller mistake).
+	emptySigner := keys.NewSigner()
+	srv := s.handlerWith(s.registry, emptySigner, admin.WithIDGenerator(s.nextID))
+	defer srv.Close()
+
+	resp := s.doRequest(srv, http.MethodPost, "/admin/keys",
+		postBody{Namespace: "ns", Role: "read", Owner: "o"})
+	defer func() { _ = resp.Body.Close() }()
+	s.Equal(http.StatusInternalServerError, resp.StatusCode)
+}
+
+func (s *KeysSuite) TestPostIDGeneratorErrorBubblesUp500() {
+	bad := func() (string, error) { return "", errors.New("rng dry") }
+	srv := s.handlerWith(s.registry, s.signer, admin.WithIDGenerator(bad))
+	defer srv.Close()
+
+	resp := s.doRequest(srv, http.MethodPost, "/admin/keys",
+		postBody{Namespace: "ns", Role: "read", Owner: "o"})
+	defer func() { _ = resp.Body.Close() }()
+	s.Equal(http.StatusInternalServerError, resp.StatusCode)
+}
+
+func (s *KeysSuite) TestPostSaveErrorBubblesUp500() {
+	failing := &failingRegistry{wrapped: s.registry, saveErr: errors.New("disk full")}
+	srv := s.handlerWith(failing, s.signer, admin.WithIDGenerator(s.nextID))
+	defer srv.Close()
+
+	resp := s.doRequest(srv, http.MethodPost, "/admin/keys",
+		postBody{Namespace: "ns", Role: "read", Owner: "o"})
+	defer func() { _ = resp.Body.Close() }()
+	s.Equal(http.StatusInternalServerError, resp.StatusCode)
+}
+
+func (s *KeysSuite) TestListRegistryErrorBubblesUp500() {
+	failing := &failingRegistry{wrapped: s.registry, listErr: errors.New("scan failed")}
+	srv := s.handlerWith(failing, s.signer, admin.WithIDGenerator(s.nextID))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/admin/keys")
+	s.Require().NoError(err)
+	defer func() { _ = resp.Body.Close() }()
+	s.Equal(http.StatusInternalServerError, resp.StatusCode)
+}
+
+func (s *KeysSuite) TestDeleteRegistryErrorBubblesUp500() {
+	// A non-NotFound error from MarkRevoked must surface as 500 (distinct
+	// from the idempotent 204 and the unknown-id 404 paths exercised
+	// elsewhere).
+	failing := &failingRegistry{wrapped: s.registry, markRevokedErr: errors.New("disk on fire")}
+	srv := s.handlerWith(failing, s.signer, admin.WithIDGenerator(s.nextID))
+	defer srv.Close()
+
+	resp := s.doRequest(srv, http.MethodDelete, "/admin/keys/"+uuid.NewString(), nil)
+	defer func() { _ = resp.Body.Close() }()
+	s.Equal(http.StatusInternalServerError, resp.StatusCode)
+}
+
+// failingRegistry overlays a real registry with per-method error stubs so the
+// suite can drive each non-NotFound error path through the handler. Any
+// stubbed error short-circuits the corresponding call; the others delegate.
 type failingRegistry struct {
-	wrapped admin.KeyRegistry
-	byIDErr error
+	wrapped        admin.KeyRegistry
+	saveErr        error
+	byIDErr        error
+	listErr        error
+	markRevokedErr error
 }
 
 func (f *failingRegistry) Save(ctx context.Context, k admin.IntegrationKey) error {
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	return f.wrapped.Save(ctx, k)
 }
-func (f *failingRegistry) ByID(_ context.Context, _ string) (admin.IntegrationKey, error) {
-	return admin.IntegrationKey{}, f.byIDErr
+
+func (f *failingRegistry) ByID(ctx context.Context, id string) (admin.IntegrationKey, error) {
+	if f.byIDErr != nil {
+		return admin.IntegrationKey{}, f.byIDErr
+	}
+	return f.wrapped.ByID(ctx, id)
 }
+
 func (f *failingRegistry) List(ctx context.Context, q admin.ListFilter) ([]admin.IntegrationKey, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.wrapped.List(ctx, q)
 }
+
 func (f *failingRegistry) MarkRevoked(ctx context.Context, id string) (string, error) {
+	if f.markRevokedErr != nil {
+		return "", f.markRevokedErr
+	}
 	return f.wrapped.MarkRevoked(ctx, id)
 }
 
