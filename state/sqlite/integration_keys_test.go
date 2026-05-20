@@ -217,3 +217,31 @@ func (s *StoreSuite) TestMarkRevokedUnknownIDReturnsNotFound() {
 	_, err := s.store.MarkIntegrationKeyRevoked(s.ctx, uuid.NewString())
 	s.Require().ErrorIs(err, admin.ErrIntegrationKeyNotFound)
 }
+
+// TestListNormalisesNonPositiveLimit locks the store-side boundary clamp.
+// The HTTP handler already normalises Limit, but a direct caller (cleanup
+// job, future internal tool) that passes Limit=0 or Limit=-1 must NOT cause
+// SQL LIMIT 0 (silent zero results that mask a bug) — the store falls back
+// to its own default page size in that case.
+func (s *StoreSuite) TestListNormalisesNonPositiveLimit() {
+	for i := 0; i < 3; i++ {
+		s.seedKey(admin.WithNamespace("ns"), admin.WithRole(admin.RoleRead), admin.WithOwner("o"))
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	cases := []struct {
+		name  string
+		limit int
+	}{
+		{"zero", 0},
+		{"negative", -1},
+		{"large negative", -10000},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			got, err := s.store.ListIntegrationKeys(s.ctx, admin.ListFilter{Limit: tc.limit})
+			s.Require().NoError(err)
+			s.Len(got, 3, "non-positive limit must fall back to a sane default, not return zero rows")
+		})
+	}
+}

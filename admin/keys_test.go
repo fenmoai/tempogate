@@ -493,6 +493,58 @@ func (s *KeysSuite) TestPathConstantsMatchRegisteredRoutes() {
 	s.Equal("/admin/keys/{id}", admin.KeysIDPath)
 }
 
+// TestNilOptionsAndDepsPanic locks the fail-fast wiring contract: passing a
+// nil dependency or a nil option-function turns a wiring bug into an
+// immediate startup panic, never a per-request crash that only surfaces in
+// production traffic. Each branch is asserted independently so a regression
+// pinpoints the exact constructor / option that lost the check.
+func (s *KeysSuite) TestNilOptionsAndDepsPanic() {
+	cases := []struct {
+		name string
+		fn   func()
+	}{
+		{
+			name: "WithClock(nil)",
+			fn:   func() { _ = admin.WithClock(nil) },
+		},
+		{
+			name: "WithIDGenerator(nil)",
+			fn:   func() { _ = admin.WithIDGenerator(nil) },
+		},
+		{
+			name: "NewKeys(nil registry, signer)",
+			fn:   func() { _ = admin.NewKeys(nil, s.signer) },
+		},
+		{
+			name: "NewKeys(registry, nil signer)",
+			fn:   func() { _ = admin.NewKeys(s.registry, nil) },
+		},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			s.Require().PanicsWithValue(panicMessage(tc.name), tc.fn,
+				"%s must panic at construction, not defer the failure to a request", tc.name)
+		})
+	}
+}
+
+// panicMessage is the per-case panic string the production code emits. Kept
+// in lock-step with admin/keys.go so a future rename of the panic text
+// surfaces as a test failure here.
+func panicMessage(name string) string {
+	switch name {
+	case "WithClock(nil)":
+		return "admin: WithClock requires a non-nil clock"
+	case "WithIDGenerator(nil)":
+		return "admin: WithIDGenerator requires a non-nil generator"
+	case "NewKeys(nil registry, signer)":
+		return "admin: NewKeys requires a non-nil registry"
+	case "NewKeys(registry, nil signer)":
+		return "admin: NewKeys requires a non-nil signer"
+	}
+	return ""
+}
+
 func (s *KeysSuite) TestStoreErrorBubblesUp() {
 	// Sanity: an unexpected (non-NotFound) error from the registry surfaces
 	// as 500 rather than being silently swallowed.
