@@ -17,16 +17,34 @@ import (
 )
 
 type apiConfig struct {
+	// registrars are mounted on the OIDC-surface adapter, which moves under
+	// basePath when one is set. JWKS + discovery use this so the
+	// well-known URLs match the issuer in the discovery document.
 	registrars []func(huma.API)
-	basePath   string
+	// rootRegistrars are always mounted at the root of the public listener
+	// regardless of basePath. The admin surface uses this so /admin/keys
+	// stays at root even when OIDC is path-prefixed under /idp; a future
+	// commit moves admin to its own private listener and any overlap with
+	// the OIDC prefix would be a deployment hazard.
+	rootRegistrars []func(huma.API)
+	basePath       string
 }
 
 type Option func(*apiConfig)
 
-// WithRegistrar lets feature modules (OIDC, admin, JWKS) plug additional Huma
-// route registrations onto the OIDC-surface adapter.
+// WithRegistrar lets feature modules (OIDC, JWKS) plug additional Huma route
+// registrations onto the OIDC-surface adapter — that surface moves under
+// basePath when one is set.
 func WithRegistrar(fn func(huma.API)) Option {
 	return func(c *apiConfig) { c.registrars = append(c.registrars, fn) }
+}
+
+// WithRootRegistrar mounts a Huma registrar at the root regardless of
+// basePath. Use for surfaces that must never be shadowed by the OIDC
+// prefix — currently /admin/keys, which a follow-up will move off the
+// public listener entirely.
+func WithRootRegistrar(fn func(huma.API)) Option {
+	return func(c *apiConfig) { c.rootRegistrars = append(c.rootRegistrars, fn) }
 }
 
 // WithBasePath mounts the OIDC surface under a URL path prefix — the path
@@ -50,28 +68,46 @@ func New(readiness *Readiness, opts ...Option) *Result {
 
 	mux := http.NewServeMux()
 
-	// Root mode: one adapter, health + OIDC at the root. Byte-identical to
-	// the original behaviour for every deployment that doesn't set a path.
+	// Root mode: one adapter, every registrar at the root.
+	// Byte-identical to the original behaviour for every deployment that
+	// doesn't set a path — root registrars and OIDC registrars all land on
+	// the same adapter, since "root" and "basePath" are the same place.
 	if cfg.basePath == "" {
 		a := humago.NewWithPrefix(mux, "", huma.DefaultConfig("tempogate", buildinfo.Version()))
 		registerHealth(a, readiness)
+		for _, fn := range cfg.rootRegistrars {
+			fn(a)
+		}
 		for _, fn := range cfg.registrars {
 			fn(a)
 		}
 		return &Result{API: a, Handler: mux, Prefix: ""}
 	}
 
-	// Base-path mode: two adapters on one mux. Health stays at the root
-	// (probe-only); the OIDC surface mounts natively under basePath so the
-	// served routes, the discovery document, and the iss claim stay in
-	// lockstep with no proxy StripPrefix. The health adapter serves no
-	// OpenAPI/docs so the root surface is exactly /healthz + /readyz.
+	// Base-path mode: up to three adapters on one mux.
+	//   - healthAPI: root, probe-only (no OpenAPI/docs). Today serves
+	//     /healthz and /readyz; intentionally minimal so the root surface
+	//     stays an obvious "k8s probes only" target.
+	//   - rootAPI: root, full OpenAPI/docs — created only when at least one
+	//     root registrar is present, so callers without admin-style routes
+	//     pay no extra surface. Its OpenAPI spec describes the root-mounted
+	//     routes (e.g. /admin/keys); the OIDC spec stays under basePath.
+	//   - oidcAPI: basePath, full OpenAPI/docs. The OIDC surface mounts
+	//     natively under basePath so served routes, the discovery document,
+	//     and the iss claim stay in lockstep with no proxy StripPrefix.
 	healthCfg := huma.DefaultConfig("tempogate", buildinfo.Version())
 	healthCfg.OpenAPIPath = ""
 	healthCfg.DocsPath = ""
 	healthCfg.SchemasPath = ""
 	healthAPI := humago.NewWithPrefix(mux, "", healthCfg)
 	registerHealth(healthAPI, readiness)
+
+	if len(cfg.rootRegistrars) > 0 {
+		rootAPI := humago.NewWithPrefix(mux, "", huma.DefaultConfig("tempogate-root", buildinfo.Version()))
+		for _, fn := range cfg.rootRegistrars {
+			fn(rootAPI)
+		}
+	}
 
 	oidcAPI := humago.NewWithPrefix(mux, cfg.basePath, huma.DefaultConfig("tempogate", buildinfo.Version()))
 	for _, fn := range cfg.registrars {
