@@ -61,7 +61,7 @@ func (s *StoreSuite) TestIsCurrent() {
 
 	err = s.store.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 5")
+	s.Contains(err.Error(), "schema version 0, expected 6")
 	s.Contains(err.Error(), "tempogate migrate")
 }
 
@@ -72,7 +72,7 @@ func (s *StoreSuite) TestIsCurrentOnFreshDB() {
 
 	err = fresh.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 5")
+	s.Contains(err.Error(), "schema version 0, expected 6")
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
@@ -82,9 +82,9 @@ func (s *StoreSuite) TestMigrateIsIdempotent() {
 	var versions int
 	row := s.store.db.QueryRowContext(s.ctx, `SELECT count(*) FROM schema_migrations`)
 	s.Require().NoError(row.Scan(&versions))
-	s.Equal(5, versions)
+	s.Equal(6, versions)
 
-	for _, want := range []string{"keypairs", "auth_requests", "auth_codes", "refresh_tokens"} {
+	for _, want := range []string{"keypairs", "auth_requests", "auth_codes", "refresh_tokens", "integration_keys"} {
 		var table string
 		row = s.store.db.QueryRowContext(s.ctx,
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, want)

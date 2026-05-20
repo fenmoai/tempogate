@@ -1,0 +1,39 @@
+package admin
+
+import (
+	"github.com/danielgtaylor/huma/v2"
+	"go.uber.org/fx"
+
+	"github.com/fenmoai/tempogate/keys"
+)
+
+type keysParams struct {
+	fx.In
+
+	Registry KeyRegistry
+	Signer   *keys.Signer
+}
+
+// newKeysRegistrar builds the /admin/keys handler over the KeyRegistry
+// provided by state/sqlite's adapter and the Signer provided by keys.Fx, then
+// returns its Register method as a Huma registrar. The result is fanned into
+// the shared "api_registrars" group so api.Fx mounts /admin/keys on the
+// main listener.
+func newKeysRegistrar(p keysParams) func(huma.API) {
+	h := NewKeys(p.Registry, p.Signer)
+	return h.Register
+}
+
+// Fx contributes the /admin/keys registrar into the shared "api_registrars"
+// group. KeyRegistry is satisfied by state/sqlite's adapter constructor (see
+// state/sqlite/admin_adapter.go); the Signer is provided by keys.Fx.
+func Fx() fx.Option {
+	return fx.Options(
+		fx.Provide(
+			fx.Annotate(
+				newKeysRegistrar,
+				fx.ResultTags(`group:"api_registrars"`),
+			),
+		),
+	)
+}

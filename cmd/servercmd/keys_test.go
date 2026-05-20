@@ -73,7 +73,7 @@ func (s *KeysCmdSuite) TestRejectsStaleSchema() {
 	// Fresh store, never migrated: generate must refuse before touching keys.
 	err := s.generateCmd(nil).ExecuteContext(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 5")
+	s.Contains(err.Error(), "schema version 0, expected 6")
 	s.Contains(err.Error(), "tempogate migrate")
 }
 

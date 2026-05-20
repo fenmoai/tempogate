@@ -5,6 +5,7 @@ package app
 import (
 	"go.uber.org/fx"
 
+	"github.com/fenmoai/tempogate/admin"
 	"github.com/fenmoai/tempogate/api"
 	"github.com/fenmoai/tempogate/cmd/servercmd"
 	"github.com/fenmoai/tempogate/keys"
@@ -26,6 +27,7 @@ func serverModules() []fx.Option {
 		sqlite.Fx(),
 		keys.Fx(),
 		oidc.Fx(),
+		admin.Fx(),
 		google.Fx(),
 		api.Fx(),
 		servercmd.Fx(),
