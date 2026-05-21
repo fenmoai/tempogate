@@ -11,7 +11,7 @@ require (
 	github.com/gojekfarm/xtools/xload v0.10.0
 	github.com/gojekfarm/xtools/xload/providers/viper v0.10.0
 	github.com/google/uuid v1.6.0
-	github.com/lestrrat-go/jwx/v4 v4.0.1
+	github.com/lestrrat-go/jwx/v4 v4.0.2
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.42.0
