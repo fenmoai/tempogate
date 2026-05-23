@@ -1,11 +1,20 @@
 package oidc
 
 import (
+	"encoding/base64"
+	"fmt"
+	"time"
+
 	"github.com/danielgtaylor/huma/v2"
 	"go.uber.org/fx"
 
 	"github.com/fenmoai/tempogate/keys"
 )
+
+// sessionSigningKeyBytes is the required HMAC-SHA256 key length. RFC 4231
+// permits any length, but cutting the key shorter than the digest output
+// shrinks the effective security margin without any operator benefit.
+const sessionSigningKeyBytes = 32
 
 type clientRegistryParams struct {
 	fx.In
@@ -83,6 +92,41 @@ func newTokenRegistrar(p tokenParams) func(huma.API) {
 	return t.Register
 }
 
+type sessionManagerParams struct {
+	fx.In
+
+	Store BrowserSessionStore
+
+	TTL           time.Duration `name:"oidc_session_ttl"`
+	SigningKeyB64 string        `name:"oidc_session_signing_key"`
+}
+
+// newSessionManager builds the device-flow verification-page session manager
+// against the shared BrowserSessionStore. The HMAC-SHA256 signing key is
+// validated here so a misconfigured OIDC__SESSION_SIGNING_KEY fails graph
+// construction at startup — never at the first failed cookie verify under
+// load. An empty key is treated as missing (mirrors how OIDC__CLIENTS
+// surfaces an unset value); a base64url-decoded length other than 32 is
+// rejected because a shorter key would silently weaken the cookie MAC.
+func newSessionManager(p sessionManagerParams) (*SessionManager, error) {
+	if p.SigningKeyB64 == "" {
+		return nil, fmt.Errorf("oidc: OIDC__SESSION_SIGNING_KEY is required (base64url-encoded %d bytes)", sessionSigningKeyBytes)
+	}
+	key, err := base64.RawURLEncoding.DecodeString(p.SigningKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("oidc: OIDC__SESSION_SIGNING_KEY must be base64url-encoded: %w", err)
+	}
+	if len(key) != sessionSigningKeyBytes {
+		return nil, fmt.Errorf("oidc: OIDC__SESSION_SIGNING_KEY must decode to %d bytes, got %d", sessionSigningKeyBytes, len(key))
+	}
+
+	opts := []SessionOption{}
+	if p.TTL > 0 {
+		opts = append(opts, WithSessionTTL(p.TTL))
+	}
+	return NewSessionManager(p.Store, key, opts...), nil
+}
+
 type userInfoParams struct {
 	fx.In
 
@@ -122,6 +166,7 @@ func newDeviceAuthorizationRegistrar(p deviceAuthorizationParams) func(huma.API)
 func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(newClientRegistry),
+		fx.Provide(newSessionManager),
 		fx.Provide(
 			fx.Annotate(
 				newAuthorizeRegistrar,

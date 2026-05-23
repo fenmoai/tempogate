@@ -552,14 +552,15 @@ func (s *StoreSuite) TestFxComposition() {
 	s.T().Setenv("STATE__SQLITE__MAX_CONNS", "1")
 
 	var (
-		injected    *Store
-		asDeviceStr oidc.DeviceCodeStore
+		injected      *Store
+		asDeviceStr   oidc.DeviceCodeStore
+		asBrowserSess oidc.BrowserSessionStore
 	)
 	a := fxtest.New(s.T(),
 		config.Fx(),
 		tlog.Fx(),
 		Fx(),
-		fx.Populate(&injected, &asDeviceStr),
+		fx.Populate(&injected, &asDeviceStr, &asBrowserSess),
 	)
 	a.RequireStart()
 	defer a.RequireStop()
@@ -571,4 +572,9 @@ func (s *StoreSuite) TestFxComposition() {
 	// *Store; a refactor that drops the binding would silently break
 	// /device_authorization graph construction in production.
 	s.Require().NotNil(asDeviceStr)
+	// fx.As(new(oidc.BrowserSessionStore)) binding regression guard: the
+	// composition root depends on this interface being satisfied by
+	// *Store; a refactor that drops the binding would silently break
+	// SessionManager graph construction in production.
+	s.Require().NotNil(asBrowserSess)
 }

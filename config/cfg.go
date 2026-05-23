@@ -69,6 +69,18 @@ type OIDCConfig struct {
 	// these exactly. Empty means no one is allowed.
 	AllowedDomains string `env:"ALLOWED_DOMAINS"`
 
+	// SessionTTL bounds how long the first-party verification-page session
+	// (the signed cookie that authenticates the human on the device-flow
+	// approval UI) may live. Defaults to 5 minutes; operators may shorten
+	// or lengthen via OIDC__SESSION_TTL to match risk posture.
+	SessionTTL time.Duration `env:"SESSION_TTL"`
+
+	// SessionSigningKey is the base64url-encoded 32-byte HMAC-SHA256 key the
+	// verification-page cookie's MAC is computed under. It is required only
+	// for surfaces that mint or verify the cookie; consumers fail graph
+	// construction at startup if it is missing or the wrong length.
+	SessionSigningKey string `env:"SESSION_SIGNING_KEY"`
+
 	Google GoogleConfig `env:",prefix=GOOGLE__"`
 }
 

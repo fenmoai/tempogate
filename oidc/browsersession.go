@@ -1,6 +1,17 @@
 package oidc
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrBrowserSessionNotFound is returned by LookupBrowserSession when no row
+// matches — because the sid was never minted, was already deleted, or its
+// row was reaped. SessionManager.Get maps this to ErrNoSession so the
+// verification UI restarts the upstream IdP round-trip; the store itself
+// stays uniform with the other consumer-side sentinels (ErrAuthCodeNotFound,
+// ErrRefreshNotFound).
+var ErrBrowserSessionNotFound = errors.New("oidc: browser session not found")
 
 // BrowserSession is the first-party session row indexed by the signed
 // HttpOnly cookie that the device-flow verification page sets after the user

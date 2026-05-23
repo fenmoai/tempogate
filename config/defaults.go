@@ -30,7 +30,8 @@ func defaultConfig() *Config {
 			},
 		},
 		OIDC: OIDCConfig{
-			Issuer: "http://127.0.0.1:8000",
+			Issuer:     "http://127.0.0.1:8000",
+			SessionTTL: 5 * time.Minute,
 			Google: GoogleConfig{
 				AuthEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
 				// #nosec G101 -- public Google token endpoint URL, not a

@@ -47,8 +47,8 @@ func (s *StoreSuite) TestSaveBrowserSessionDuplicate() {
 func (s *StoreSuite) TestLookupBrowserSessionUnknown() {
 	_, err := s.store.LookupBrowserSession(s.ctx, "never-saved")
 	s.Require().Error(err)
-	s.Truef(errors.Is(err, ErrBrowserSessionNotFound),
-		"expected ErrBrowserSessionNotFound, got %v", err)
+	s.Truef(errors.Is(err, oidc.ErrBrowserSessionNotFound),
+		"expected oidc.ErrBrowserSessionNotFound, got %v", err)
 }
 
 func (s *StoreSuite) TestDeleteBrowserSession() {
@@ -78,8 +78,8 @@ func (s *StoreSuite) TestDeleteBrowserSession() {
 
 			_, err := s.store.LookupBrowserSession(s.ctx, tc.sid)
 			s.Require().Error(err)
-			s.Truef(errors.Is(err, ErrBrowserSessionNotFound),
-				"expected ErrBrowserSessionNotFound after delete, got %v", err)
+			s.Truef(errors.Is(err, oidc.ErrBrowserSessionNotFound),
+				"expected oidc.ErrBrowserSessionNotFound after delete, got %v", err)
 		})
 	}
 }
