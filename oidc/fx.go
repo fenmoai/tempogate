@@ -78,17 +78,22 @@ type tokenParams struct {
 	fx.In
 
 	Store   TokenStore
+	Devices DeviceCodeStore
 	Signer  *keys.Signer
 	Clients ClientRegistry
 }
 
 // newTokenRegistrar builds the /token endpoint. The Signer is provided by
-// keys.Fx over the shared keypair aggregate; TokenStore is satisfied by
-// state/sqlite via fx.As; ClientRegistry is the same instance /authorize
-// uses, so a code minted without PKCE is redeemable only by the confidential
-// client that secret-authenticates here.
+// keys.Fx over the shared keypair aggregate; TokenStore and DeviceCodeStore
+// are both satisfied by state/sqlite via fx.As; ClientRegistry is the same
+// instance /authorize uses, so a code minted without PKCE is redeemable only
+// by the confidential client that secret-authenticates here. Wiring the
+// DeviceCodeStore in unconditionally turns the RFC 8628 grant branch on for
+// every tempogate deployment — opting back out would mean removing the
+// /device_authorization registrar as well, so the consistent posture is to
+// expose the whole device flow or none of it.
 func newTokenRegistrar(p tokenParams) func(huma.API) {
-	t := NewToken(p.Store, p.Signer, p.Clients)
+	t := NewToken(p.Store, p.Signer, p.Clients, WithDeviceCodeStore(p.Devices))
 	return t.Register
 }
 

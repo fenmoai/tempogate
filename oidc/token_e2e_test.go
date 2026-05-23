@@ -35,6 +35,7 @@ type TokenE2ESuite struct {
 	suite.Suite
 
 	mg     *mockGoogle
+	store  *sqlite.Store
 	srv    *httptest.Server
 	client *http.Client
 }
@@ -50,6 +51,7 @@ func (s *TokenE2ESuite) SetupTest() {
 	s.Require().NoError(err)
 	s.Require().NoError(store.Migrate(ctx))
 	s.T().Cleanup(func() { _ = store.Close() })
+	s.store = store
 
 	k := keys.New(keys.WithStore(store), keys.WithGenerateOptions(keys.WithRSABits(2048)))
 	s.Require().NoError(k.Init(ctx))
@@ -64,14 +66,15 @@ func (s *TokenE2ESuite) SetupTest() {
 		s.mg.issuer(),
 	)
 
-	reg, err := oidc.ParseClientRegistry("ui:https://app.example.com/auth,webui:https://app.example.com/auth")
+	reg, err := oidc.ParseClientRegistry("ui:https://app.example.com/auth,webui:https://app.example.com/auth,tempogate-device:cli")
 	s.Require().NoError(err)
 	s.Require().NoError(reg.WithSecrets("webui:" + e2eConfidentialSecret))
 
 	authorizer := oidc.New(store, reg, testIssuer, testGoogleCID, s.mg.issuer()+"/auth")
 	callback := oidc.NewCallback(store, upstream, "example.com")
-	token := oidc.NewToken(store, signer, reg)
+	token := oidc.NewToken(store, signer, reg, oidc.WithDeviceCodeStore(store))
 	userinfo := oidc.NewUserInfo(keys.NewVerifier(keys.WithKeys(k), keys.WithIssuer(testIssuer)))
+	device := oidc.NewDeviceAuthorization(store, reg, testIssuer)
 
 	result := api.New(api.NewReadiness(),
 		api.WithWellKnown(k, testIssuer),
@@ -79,6 +82,7 @@ func (s *TokenE2ESuite) SetupTest() {
 		api.WithRegistrar(callback.Register),
 		api.WithRegistrar(token.Register),
 		api.WithRegistrar(userinfo.Register),
+		api.WithRegistrar(device.Register),
 	)
 	s.srv = httptest.NewServer(result.Public.Handler)
 	s.T().Cleanup(s.srv.Close)
@@ -365,4 +369,115 @@ func (s *TokenE2ESuite) TestConfidentialNoPKCEFlowMintsNonceAudJWT() {
 	bad := s.tokenRequest(f2)
 	defer bad.Body.Close()
 	s.Equal(http.StatusUnauthorized, bad.StatusCode)
+}
+
+// TestDeviceCodeFlowMintsJWTVerifiableAgainstPublishedJWKS proves the whole
+// RFC 8628 round-trip end-to-end against a real sqlite store and the JWKS
+// the server actually publishes: POST /device_authorization mints a row, an
+// out-of-band Approve stamps it (standing in for the verification-page UI
+// the next epic stage delivers), and POST /token with grant_type=device_code
+// yields a JWT that verifies against the same JWKS the auth-code path does —
+// with the device-flow carve-out that nonce is absent.
+func (s *TokenE2ESuite) TestDeviceCodeFlowMintsJWTVerifiableAgainstPublishedJWKS() {
+	// §3.1: CLI initiates the flow.
+	daResp, err := s.client.Post(s.srv.URL+"/device_authorization",
+		"application/x-www-form-urlencoded",
+		strings.NewReader("client_id=tempogate-device&scope=openid+email"))
+	s.Require().NoError(err)
+	defer daResp.Body.Close()
+	s.Require().Equal(http.StatusOK, daResp.StatusCode)
+
+	var da struct {
+		DeviceCode string `json:"device_code"`
+		UserCode   string `json:"user_code"`
+		Interval   int    `json:"interval"`
+	}
+	s.Require().NoError(json.NewDecoder(daResp.Body).Decode(&da))
+	s.Require().NotEmpty(da.DeviceCode)
+
+	// Stand in for the verification UI: Approve the row directly through the
+	// store. (The UI lands in the next epic stage; the contract under test
+	// here is the /token branch and the store-level transition.) The pending
+	// and slow_down state-machine branches are exercised by sibling tests —
+	// here we want the success path uncluttered by interval-window timing.
+	canonical := strings.ReplaceAll(da.UserCode, "-", "")
+	s.Require().NoError(s.store.ApproveDeviceCode(context.Background(), canonical, "alice@example.com", time.Now().UTC()))
+
+	// Approved poll: the row is consumed and a fresh JWT comes back.
+	resp := s.deviceTokenPoll(da.DeviceCode)
+	defer resp.Body.Close()
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+	body := s.decode(resp)
+	s.Equal("Bearer", body.TokenType)
+	s.Equal(14400, body.ExpiresIn)
+	s.Equal(body.AccessToken, body.IDToken)
+	s.Require().NotEmpty(body.RefreshToken)
+
+	tok, err := jwt.Parse([]byte(body.AccessToken),
+		jwt.WithKeySet(s.jwksSet()),
+		jwt.WithIssuer(testIssuer),
+	)
+	s.Require().NoError(err, "device-code JWT must verify against the same JWKS the auth-code JWT does")
+
+	sub, ok := tok.Subject()
+	s.Require().True(ok)
+	s.Equal("alice@example.com", sub)
+	aud, _ := tok.Audience()
+	s.Equal([]string{"tempogate-device"}, aud)
+	perms, _ := tok.Field("permissions")
+	s.Equal([]string{"temporal-system:admin"}, toStringSlice(s.T(), perms))
+	_, hasNonce := tok.Field("nonce")
+	s.False(hasNonce, "device-code flow has no nonce concept")
+
+	// Row was atomically consumed: a follow-up poll is invalid_grant.
+	again := s.deviceTokenPoll(da.DeviceCode)
+	defer again.Body.Close()
+	s.Equal(http.StatusBadRequest, again.StatusCode)
+}
+
+// TestDeviceCodeFlowSlowDownBumpsServerInterval drives the slow_down rule
+// against the real store: two rapid polls before any Approve land within the
+// same interval window, so the second returns slow_down and the row's
+// interval_seconds has been bumped from the seeded 5 to 10.
+func (s *TokenE2ESuite) TestDeviceCodeFlowSlowDownBumpsServerInterval() {
+	daResp, err := s.client.Post(s.srv.URL+"/device_authorization",
+		"application/x-www-form-urlencoded",
+		strings.NewReader("client_id=tempogate-device"))
+	s.Require().NoError(err)
+	defer daResp.Body.Close()
+	s.Require().Equal(http.StatusOK, daResp.StatusCode)
+
+	var da struct {
+		DeviceCode string `json:"device_code"`
+	}
+	s.Require().NoError(json.NewDecoder(daResp.Body).Decode(&da))
+
+	// Two polls back-to-back; the second is within the 5s window.
+	first := s.deviceTokenPoll(da.DeviceCode)
+	first.Body.Close()
+	s.Require().Equal(http.StatusBadRequest, first.StatusCode)
+
+	second := s.deviceTokenPoll(da.DeviceCode)
+	defer second.Body.Close()
+	s.Require().Equal(http.StatusBadRequest, second.StatusCode)
+
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	s.Require().NoError(json.NewDecoder(second.Body).Decode(&errBody))
+	s.Equal("slow_down", errBody.Error)
+
+	row, err := s.store.LookupDeviceCodeByDeviceCode(context.Background(), da.DeviceCode)
+	s.Require().NoError(err)
+	s.Equal(10, row.IntervalSeconds, "slow_down must persist the +5s bump through the real sqlite store")
+}
+
+// deviceTokenPoll is the CLI's wire-level poll: form-encoded
+// grant_type=urn:..., device_code, client_id.
+func (s *TokenE2ESuite) deviceTokenPoll(deviceCode string) *http.Response {
+	f := url.Values{}
+	f.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+	f.Set("device_code", deviceCode)
+	f.Set("client_id", "tempogate-device")
+	return s.tokenRequest(f)
 }

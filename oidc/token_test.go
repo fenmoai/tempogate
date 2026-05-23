@@ -161,12 +161,13 @@ func (m *memTokenStore) refreshCount() int {
 type TokenSuite struct {
 	suite.Suite
 
-	store    *memTokenStore
-	keys     *keys.Keys
-	verifier *keys.Verifier
-	clients  oidc.ClientRegistry
-	srv      *httptest.Server
-	client   *http.Client
+	store       *memTokenStore
+	deviceStore *memDeviceFlowStore
+	keys        *keys.Keys
+	verifier    *keys.Verifier
+	clients     oidc.ClientRegistry
+	srv         *httptest.Server
+	client      *http.Client
 }
 
 // confidentialSecret is the shared secret for the test's older-style
@@ -194,15 +195,17 @@ func (s *TokenSuite) SetupTest() {
 		keys.WithTokenClock(func() time.Time { return signNow.Add(time.Minute) }),
 	)
 
-	reg, err := oidc.ParseClientRegistry("ui:" + testRedirectURI + ",webui:" + testRedirectURI)
+	reg, err := oidc.ParseClientRegistry("ui:" + testRedirectURI + ",webui:" + testRedirectURI + ",tempogate-device:" + testRedirectURI)
 	s.Require().NoError(err)
 	s.Require().NoError(reg.WithSecrets("webui:" + confidentialSecret))
 	s.clients = reg
 
 	s.store = newMemTokenStore()
+	s.deviceStore = newMemDeviceFlowStore()
 	tok := oidc.NewToken(s.store, signer, s.clients,
 		oidc.WithTokenClock(func() time.Time { return signNow }),
 		oidc.WithRefreshGenerator(func() (string, error) { return fixedRefresh, nil }),
+		oidc.WithDeviceCodeStore(s.deviceStore),
 	)
 	mux := http.NewServeMux()
 	tok.Register(humago.New(mux, huma.DefaultConfig("test", "0.0.0")))

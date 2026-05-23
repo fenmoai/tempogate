@@ -27,6 +27,9 @@ const (
 
 	grantAuthorizationCode = "authorization_code"
 	grantRefreshToken      = "refresh_token"
+	// grantDeviceCode is the RFC 8628 §3.4 grant_type the CLI presents on every
+	// poll. The full URN is part of the contract — clients copy it verbatim.
+	grantDeviceCode = "urn:ietf:params:oauth:grant-type:device_code"
 
 	// accessTokenTTL is the lifetime of a minted access/id token. Short
 	// enough that a leaked token has a bounded blast radius; the refresh
@@ -97,10 +100,12 @@ type ClientAuthenticator interface {
 
 // Token serves POST /token: it completes the authorization-code flow by
 // exchanging a redeemed code for a signed JWT — PKCE-verified for public
-// clients, client-secret-authenticated for the confidential carve-out — and
-// renews sessions via the refresh-token grant.
+// clients, client-secret-authenticated for the confidential carve-out —
+// renews sessions via the refresh-token grant, and (when a DeviceCodeStore
+// is wired in) redeems the RFC 8628 device-code grant the CLI polls on.
 type Token struct {
 	store      TokenStore
+	devices    DeviceCodeStore
 	signer     *keys.Signer
 	clients    ClientAuthenticator
 	now        func() time.Time
@@ -118,6 +123,15 @@ func WithTokenClock(now func() time.Time) TokenOption {
 // WithRefreshGenerator swaps the opaque refresh-token generator. For tests.
 func WithRefreshGenerator(fn func() (string, error)) TokenOption {
 	return func(t *Token) { t.newRefresh = fn }
+}
+
+// WithDeviceCodeStore plugs the RFC 8628 device-code grant in. Without it,
+// /token rejects device_code as unsupported_grant_type; with it, the full
+// §3.5 polling state machine is exposed. Declared as a separate dependency
+// (rather than folded into TokenStore) so the auth-code surface stays
+// minimal for deployments that opt out of the device flow.
+func WithDeviceCodeStore(s DeviceCodeStore) TokenOption {
+	return func(t *Token) { t.devices = s }
 }
 
 func NewToken(store TokenStore, signer *keys.Signer, clients ClientAuthenticator, opts ...TokenOption) *Token {
@@ -192,10 +206,12 @@ func (t *Token) handle(ctx context.Context, in *tokenInput) (*tokenOutput, error
 		return t.authorizationCodeGrant(ctx, form, in.Authorization)
 	case grantRefreshToken:
 		return t.refreshTokenGrant(ctx, form)
+	case grantDeviceCode:
+		return t.deviceCodeGrant(ctx, form)
 	case "":
 		return nil, oauthErr(http.StatusBadRequest, "invalid_request", "grant_type is required")
 	default:
-		return nil, oauthErr(http.StatusBadRequest, "unsupported_grant_type", "only authorization_code and refresh_token are supported")
+		return nil, oauthErr(http.StatusBadRequest, "unsupported_grant_type", "only authorization_code, refresh_token, and urn:ietf:params:oauth:grant-type:device_code are supported")
 	}
 }
 
