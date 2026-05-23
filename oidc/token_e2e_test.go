@@ -429,10 +429,18 @@ func (s *TokenE2ESuite) TestDeviceCodeFlowMintsJWTVerifiableAgainstPublishedJWKS
 	_, hasNonce := tok.Field("nonce")
 	s.False(hasNonce, "device-code flow has no nonce concept")
 
-	// Row was atomically consumed: a follow-up poll is invalid_grant.
+	// Row was atomically consumed: a follow-up poll is invalid_grant —
+	// asserting the OAuth error code as well as the status guards against a
+	// regression to slow_down or any other 400 family that would also pass a
+	// status-only check.
 	again := s.deviceTokenPoll(da.DeviceCode)
 	defer again.Body.Close()
 	s.Equal(http.StatusBadRequest, again.StatusCode)
+	var againErr struct {
+		Error string `json:"error"`
+	}
+	s.Require().NoError(json.NewDecoder(again.Body).Decode(&againErr))
+	s.Equal("invalid_grant", againErr.Error)
 }
 
 // TestDeviceCodeFlowSlowDownBumpsServerInterval drives the slow_down rule
