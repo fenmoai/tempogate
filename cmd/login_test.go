@@ -139,3 +139,162 @@ func (s *LoginCmdSuite) TestFlagIssuerOverridesEnvAndErrorsPropagate() {
 	s.Contains(err.Error(), "invalid_grant")
 	s.Empty(out.String(), "no token is printed on failure")
 }
+
+// DeviceLoginDispatchSuite covers the --device / TEMPOGATE_LOGIN_MODE dispatch
+// table. Kept in a sibling suite so SetupTest captures both runner seams
+// without burdening the loopback tests with state they do not exercise.
+type DeviceLoginDispatchSuite struct {
+	suite.Suite
+
+	origLoginRunner  func(context.Context, ...cli.Option) (cli.Token, error)
+	origDeviceRunner func(context.Context, ...cli.DeviceOption) (cli.Token, error)
+}
+
+func TestDeviceLoginDispatchSuite(t *testing.T) {
+	suite.Run(t, new(DeviceLoginDispatchSuite))
+}
+
+func (s *DeviceLoginDispatchSuite) SetupTest() {
+	s.origLoginRunner = loginRunner
+	s.origDeviceRunner = deviceRunner
+}
+
+func (s *DeviceLoginDispatchSuite) TearDownTest() {
+	loginRunner = s.origLoginRunner
+	deviceRunner = s.origDeviceRunner
+}
+
+func (s *DeviceLoginDispatchSuite) TestDispatchTable() {
+	cases := []struct {
+		name       string
+		args       []string
+		envMode    string
+		wantDevice bool
+	}{
+		{
+			name:       "flag dispatches to device path",
+			args:       []string{"--device"},
+			envMode:    "",
+			wantDevice: true,
+		},
+		{
+			name:       "env dispatches to device path",
+			args:       nil,
+			envMode:    "device",
+			wantDevice: true,
+		},
+		{
+			name:       "neither flag nor env dispatches to loopback",
+			args:       nil,
+			envMode:    "",
+			wantDevice: false,
+		},
+		{
+			name:       "explicit --device=false overrides env=device",
+			args:       []string{"--device=false"},
+			envMode:    "device",
+			wantDevice: false,
+		},
+		{
+			name:       "unrelated env value does not flip dispatch",
+			args:       nil,
+			envMode:    "loopback",
+			wantDevice: false,
+		},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			s.T().Setenv("TEMPOGATE__ISSUER", "https://tempogate.example.com")
+			s.T().Setenv("TEMPOGATE_LOGIN_MODE", tc.envMode)
+
+			var loopbackCalls, deviceCalls int
+			loginRunner = func(_ context.Context, _ ...cli.Option) (cli.Token, error) {
+				loopbackCalls++
+				return cli.Token{AccessToken: "loopback-token"}, nil
+			}
+			deviceRunner = func(_ context.Context, _ ...cli.DeviceOption) (cli.Token, error) {
+				deviceCalls++
+				return cli.Token{AccessToken: "device-token"}, nil
+			}
+
+			path := filepath.Join(s.T().TempDir(), "token.json")
+			args := append([]string{"--token-file", path}, tc.args...)
+
+			var out, errOut bytes.Buffer
+			cmd := newLoginCmd(zap.NewNop())
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			cmd.SetArgs(args)
+
+			s.Require().NoError(cmd.ExecuteContext(context.Background()))
+
+			if tc.wantDevice {
+				s.Equal(1, deviceCalls, "device runner must be invoked")
+				s.Zero(loopbackCalls, "loopback runner must not be invoked")
+				s.Equal("device-token\n", out.String())
+			} else {
+				s.Equal(1, loopbackCalls, "loopback runner must be invoked")
+				s.Zero(deviceCalls, "device runner must not be invoked")
+				s.Equal("loopback-token\n", out.String())
+			}
+		})
+	}
+}
+
+func (s *DeviceLoginDispatchSuite) TestDevicePathPersistsTokenAndPrintsSignedIn() {
+	s.T().Setenv("TEMPOGATE__ISSUER", "https://tempogate.example.com")
+	expiry := time.Date(2031, 6, 7, 8, 9, 10, 0, time.UTC)
+	deviceRunner = func(_ context.Context, _ ...cli.DeviceOption) (cli.Token, error) {
+		return cli.Token{AccessToken: "dev.payload.sig", RefreshToken: "dev-r-1", ExpiresAt: expiry}, nil
+	}
+	loginRunner = func(_ context.Context, _ ...cli.Option) (cli.Token, error) {
+		s.FailNow("loopback runner must not run on the device path")
+		return cli.Token{}, nil
+	}
+	path := filepath.Join(s.T().TempDir(), "nested", "token.json")
+
+	var out, errOut bytes.Buffer
+	cmd := newLoginCmd(zap.NewNop())
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--device", "--token-file", path})
+
+	s.Require().NoError(cmd.ExecuteContext(context.Background()))
+	s.Equal("dev.payload.sig\n", out.String(), "stdout carries only the token")
+	s.Contains(errOut.String(), "Signed in. Token saved to "+path)
+	s.Contains(errOut.String(), "valid until 2031-06-07T08:09:10Z")
+
+	persisted, err := cli.Load(path)
+	s.Require().NoError(err)
+	s.Equal("dev.payload.sig", persisted.AccessToken)
+	s.Equal("dev-r-1", persisted.RefreshToken)
+}
+
+func (s *DeviceLoginDispatchSuite) TestDeviceRunnerErrorPropagates() {
+	s.T().Setenv("TEMPOGATE__ISSUER", "https://tempogate.example.com")
+	deviceRunner = func(_ context.Context, _ ...cli.DeviceOption) (cli.Token, error) {
+		return cli.Token{}, errors.New("cli: user denied the device authorization")
+	}
+
+	var out bytes.Buffer
+	cmd := newLoginCmd(zap.NewNop())
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&out)
+	cmd.SetErr(new(testWriter))
+	cmd.SetArgs([]string{"--device", "--token-file", filepath.Join(s.T().TempDir(), "t.json")})
+
+	err := cmd.ExecuteContext(context.Background())
+	s.Require().Error(err)
+	s.Contains(err.Error(), "user denied")
+	s.Empty(out.String(), "no token is printed on device-flow failure")
+}
+
+func (s *DeviceLoginDispatchSuite) TestDefaultDeviceRunnerDelegatesToDeviceFlow() {
+	_, err := deviceRunner(context.Background(), cli.WithDeviceIssuer(""))
+	s.Require().Error(err)
+	s.Contains(err.Error(), "issuer is required")
+}
