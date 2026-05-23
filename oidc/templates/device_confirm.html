@@ -1,0 +1,22 @@
+{{define "title"}}Confirm device code{{end}}
+{{define "content" -}}
+<h1>Confirm device sign-in</h1>
+<p>Verify this code matches what your terminal is showing before approving.</p>
+<div class="user-code" aria-label="Device code">{{.DisplayUserCode}}</div>
+<p>Signed in as <strong>{{.Email}}</strong>.</p>
+<div class="warn">
+  Approving grants the device the same access you have. Only approve if you started this sign-in yourself.
+</div>
+<div class="actions">
+  <form method="post" action="{{.ApproveURL}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="user_code" value="{{.DisplayUserCode}}">
+    <button type="submit" class="primary">Approve</button>
+  </form>
+  <form method="post" action="{{.DenyURL}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="user_code" value="{{.DisplayUserCode}}">
+    <button type="submit" class="danger">Deny</button>
+  </form>
+</div>
+{{- end}}

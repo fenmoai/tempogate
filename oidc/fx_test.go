@@ -21,6 +21,13 @@ import (
 
 var testSigningKeyB64 = base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 
+// deviceUIFxClients is the canonical clients string the FxSuite uses to
+// satisfy the device-ui registrar's internal-client requirement on top of
+// the regular `ui` + `tempogate-device` registrations. Each test that
+// drives the graph successfully composes this with the matching secret in
+// supplyConfig*.
+const deviceUIFxClients = "ui:https://app.example.com/auth,tempogate-device:cli,tempogate-device-ui:" + testIssuer + "/device/sso-callback"
+
 type FxSuite struct {
 	suite.Suite
 }
@@ -30,10 +37,18 @@ func TestFxSuite(t *testing.T) {
 }
 
 func (s *FxSuite) supplyConfig(clients string) fx.Option {
-	return s.supplyConfigWithSessionKey(clients, testSigningKeyB64)
+	return s.supplyConfigFull(clients, "tempogate-device-ui:"+deviceUIInternalSecret, testSigningKeyB64)
 }
 
 func (s *FxSuite) supplyConfigWithSessionKey(clients, signingKeyB64 string) fx.Option {
+	return s.supplyConfigFull(clients, "tempogate-device-ui:"+deviceUIInternalSecret, signingKeyB64)
+}
+
+// supplyConfigFull is the underlying knob the suite's helpers compose on.
+// It exists so a small number of tests — the device-ui graph-failure
+// regression guards — can vary the secrets independently of the clients
+// list without forcing every other test to plumb a fourth argument.
+func (s *FxSuite) supplyConfigFull(clients, secrets, signingKeyB64 string) fx.Option {
 	return fx.Options(
 		fx.Provide(func() oidc.AuthRequestStore { return &memAuthStore{} }),
 		fx.Provide(func() oidc.BrowserSessionStore { return newMemBrowserSessionStore() }),
@@ -46,7 +61,7 @@ func (s *FxSuite) supplyConfigWithSessionKey(clients, signingKeyB64 string) fx.O
 		fx.Supply(
 			fx.Annotated{Name: "oidc_issuer", Target: testIssuer},
 			fx.Annotated{Name: "oidc_clients", Target: clients},
-			fx.Annotated{Name: "oidc_client_secrets", Target: ""},
+			fx.Annotated{Name: "oidc_client_secrets", Target: secrets},
 			fx.Annotated{Name: "oidc_allowed_domains", Target: "example.com"},
 			fx.Annotated{Name: "oidc_session_ttl", Target: 5 * time.Minute},
 			fx.Annotated{Name: "oidc_session_signing_key", Target: signingKeyB64},
@@ -64,14 +79,14 @@ type registrarParams struct {
 func (s *FxSuite) TestProvidesRegistrarIntoGroup() {
 	var got registrarParams
 	app := fxtest.New(s.T(),
-		s.supplyConfig("ui:https://app.example.com/auth,tempogate-device:cli"),
+		s.supplyConfig(deviceUIFxClients),
 		oidc.Fx(),
 		fx.Populate(&got),
 	)
 	app.RequireStart()
 	defer app.RequireStop()
 
-	s.Require().Len(got.Registrars, 5)
+	s.Require().Len(got.Registrars, 6)
 }
 
 // TestDeviceAuthorizationIsWiredIntoPublicAPI is the registration regression
@@ -82,7 +97,7 @@ func (s *FxSuite) TestProvidesRegistrarIntoGroup() {
 func (s *FxSuite) TestDeviceAuthorizationIsWiredIntoPublicAPI() {
 	var got registrarParams
 	app := fxtest.New(s.T(),
-		s.supplyConfig("ui:https://app.example.com/auth,tempogate-device:cli"),
+		s.supplyConfig(deviceUIFxClients),
 		oidc.Fx(),
 		fx.Populate(&got),
 	)
@@ -118,7 +133,7 @@ func (s *FxSuite) TestDeviceAuthorizationIsWiredIntoPublicAPI() {
 func (s *FxSuite) TestTokenDeviceCodeBranchIsWired() {
 	var got registrarParams
 	app := fxtest.New(s.T(),
-		s.supplyConfig("ui:https://app.example.com/auth,tempogate-device:cli"),
+		s.supplyConfig(deviceUIFxClients),
 		oidc.Fx(),
 		fx.Populate(&got),
 	)
@@ -174,6 +189,91 @@ func (s *FxSuite) TestProvidesSessionManager() {
 	defer app.RequireStop()
 
 	s.Require().NotNil(sm)
+}
+
+// TestDeviceUIIsWiredIntoPublicAPI is the registration regression guard for
+// the verification-UI surface: graph construction must produce GET /device,
+// POST /device, GET /device/sso-callback, GET /device/confirm,
+// POST /device/approve and POST /device/deny against the same Huma API the
+// api package collects registrars onto. A missing provider would short the
+// registrar group; a NewDeviceUI graph-time failure would prevent
+// fx.Populate from returning at all.
+func (s *FxSuite) TestDeviceUIIsWiredIntoPublicAPI() {
+	var got registrarParams
+	app := fxtest.New(s.T(),
+		s.supplyConfig(deviceUIFxClients),
+		oidc.Fx(),
+		fx.Populate(&got),
+	)
+	app.RequireStart()
+	defer app.RequireStop()
+
+	mux := http.NewServeMux()
+	api := humago.New(mux, huma.DefaultConfig("fx_test", "0.0.0"))
+	for _, fn := range got.Registrars {
+		fn(api)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	probes := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"GET /device", http.MethodGet, "/device", ""},
+		{"POST /device", http.MethodPost, "/device", "filler=x"},
+		{"GET /device/sso-callback", http.MethodGet, "/device/sso-callback?code=x&state=y", ""},
+		{"GET /device/confirm", http.MethodGet, "/device/confirm?user_code=BCDF-GHJK", ""},
+		{"POST /device/approve", http.MethodPost, "/device/approve", "filler=x"},
+		{"POST /device/deny", http.MethodPost, "/device/deny", "filler=x"},
+	}
+	for _, tc := range probes {
+		s.Run(tc.name, func() {
+			req, err := http.NewRequest(tc.method, srv.URL+tc.path, strings.NewReader(tc.body))
+			s.Require().NoError(err)
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.Header.Set("Origin", testIssuer)
+			}
+			resp, err := client.Do(req)
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.NotEqualf(http.StatusNotFound, resp.StatusCode,
+				"%s %s must be registered against the public huma API", tc.method, tc.path)
+		})
+	}
+}
+
+func (s *FxSuite) TestDeviceUIMissingInternalClientFailsGraph() {
+	app := fx.New(
+		fx.NopLogger,
+		// Note: tempogate-device-ui is intentionally absent from the clients
+		// list, mirroring the operator-misconfiguration the registrar guards
+		// against. Graph construction must surface that as an actionable
+		// failure rather than silently disabling the UI surface.
+		s.supplyConfigFull("ui:https://app.example.com/auth,tempogate-device:cli", "", testSigningKeyB64),
+		oidc.Fx(),
+		fx.Invoke(func(registrarParams) {}),
+	)
+	s.Require().Error(app.Err())
+	s.Contains(app.Err().Error(), "device-ui client", "error must point at the missing internal client")
+}
+
+func (s *FxSuite) TestDeviceUIPublicInternalClientFailsGraph() {
+	app := fx.New(
+		fx.NopLogger,
+		// tempogate-device-ui is registered but no secret accompanies it —
+		// the registrar must reject the public registration.
+		s.supplyConfigFull(deviceUIFxClients, "", testSigningKeyB64),
+		oidc.Fx(),
+		fx.Invoke(func(registrarParams) {}),
+	)
+	s.Require().Error(app.Err())
+	s.Contains(app.Err().Error(), "confidential", "error must point at the missing client secret")
 }
 
 func (s *FxSuite) TestSessionSigningKeyValidation() {

@@ -1,0 +1,1258 @@
+package oidc_test
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"hash"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/fenmoai/tempogate/oidc"
+)
+
+func stdHMACSHA256(key []byte) hash.Hash { return hmac.New(sha256.New, key) }
+
+const (
+	deviceUITestUserCanonical = "BCDFGHJK"
+	deviceUITestUserDisplay   = "BCDF-GHJK"
+	deviceUITestSID           = "fixed-device-ui-sid"
+	deviceUITestEmail         = "alice@example.com"
+	deviceUITestStateNonce    = "fixed-state-nonce"
+	deviceUIInternalSecret    = "device-ui-secret"
+	deviceUIClientsRaw        = "tempogate-device:cli,tempogate-device-ui:https://tempogate.example.com/device/sso-callback"
+)
+
+var deviceUINow = time.Unix(1700000000, 0).UTC()
+
+// statefulDeviceCodeStore is a richer in-memory store than memDeviceCodeStore:
+// the device-ui tests need a live LookupDeviceCodeByUserCode and a flipping
+// Approve/Deny because both sit on the happy path. Other methods are stubs
+// since the verification UI does not exercise them.
+type statefulDeviceCodeStore struct {
+	mu         sync.Mutex
+	byUser     map[string]oidc.DeviceCode
+	approved   []deviceDecision
+	denied     []deviceDecision
+	lookupErr  error
+	approveErr error
+	denyErr    error
+}
+
+type deviceDecision struct {
+	UserCode string
+	Email    string
+	At       time.Time
+}
+
+func newStatefulDeviceCodeStore() *statefulDeviceCodeStore {
+	return &statefulDeviceCodeStore{byUser: map[string]oidc.DeviceCode{}}
+}
+
+func (s *statefulDeviceCodeStore) put(dc oidc.DeviceCode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.byUser[dc.UserCode] = dc
+}
+
+func (s *statefulDeviceCodeStore) SaveDeviceCode(_ context.Context, dc oidc.DeviceCode) error {
+	s.put(dc)
+	return nil
+}
+
+func (s *statefulDeviceCodeStore) LookupDeviceCodeByDeviceCode(_ context.Context, _ string) (oidc.DeviceCode, error) {
+	return oidc.DeviceCode{}, oidc.ErrDeviceCodeNotFound
+}
+
+func (s *statefulDeviceCodeStore) LookupDeviceCodeByUserCode(_ context.Context, userCode string) (oidc.DeviceCode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lookupErr != nil {
+		return oidc.DeviceCode{}, s.lookupErr
+	}
+	dc, ok := s.byUser[userCode]
+	if !ok {
+		return oidc.DeviceCode{}, oidc.ErrDeviceCodeNotFound
+	}
+	return dc, nil
+}
+
+func (s *statefulDeviceCodeStore) TouchDeviceCodePoll(_ context.Context, _ string, _ time.Time, _ bool) error {
+	return nil
+}
+
+func (s *statefulDeviceCodeStore) ApproveDeviceCode(_ context.Context, userCode, email string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.approveErr != nil {
+		return s.approveErr
+	}
+	dc, ok := s.byUser[userCode]
+	if !ok {
+		return oidc.ErrDeviceCodeNotFound
+	}
+	if dc.ApprovedAt != nil || dc.DeniedAt != nil {
+		return oidc.ErrDeviceCodeNotPending
+	}
+	dc.ApprovedAt = &now
+	dc.Email = email
+	s.byUser[userCode] = dc
+	s.approved = append(s.approved, deviceDecision{UserCode: userCode, Email: email, At: now})
+	return nil
+}
+
+func (s *statefulDeviceCodeStore) DenyDeviceCode(_ context.Context, userCode string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.denyErr != nil {
+		return s.denyErr
+	}
+	dc, ok := s.byUser[userCode]
+	if !ok {
+		return oidc.ErrDeviceCodeNotFound
+	}
+	if dc.ApprovedAt != nil || dc.DeniedAt != nil {
+		return oidc.ErrDeviceCodeNotPending
+	}
+	dc.DeniedAt = &now
+	s.byUser[userCode] = dc
+	s.denied = append(s.denied, deviceDecision{UserCode: userCode, At: now})
+	return nil
+}
+
+func (s *statefulDeviceCodeStore) ConsumeDeviceCode(_ context.Context, _ string) (oidc.DeviceCode, error) {
+	return oidc.DeviceCode{}, oidc.ErrDeviceCodeNotFound
+}
+
+func (s *statefulDeviceCodeStore) countApproved() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.approved)
+}
+
+func (s *statefulDeviceCodeStore) countDenied() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.denied)
+}
+
+// fakeTokenServer stands in for the real /token endpoint the sso-callback
+// posts to. The DeviceUI's redeem path is exercised by pointing
+// WithInternalTokenURL at it. The body it returns is a JWT-shaped string
+// whose middle segment base64url-decodes to a {email} JSON payload, which
+// matches the contract DeviceUI relies on (header.payload.signature).
+type fakeTokenServer struct {
+	srv      *httptest.Server
+	mu       sync.Mutex
+	email    string
+	status   int
+	calls    int
+	lastForm url.Values
+}
+
+func newFakeTokenServer(email string) *fakeTokenServer {
+	t := &fakeTokenServer{email: email, status: http.StatusOK}
+	t.srv = httptest.NewServer(http.HandlerFunc(t.handle))
+	return t
+}
+
+func (t *fakeTokenServer) handle(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	form, _ := url.ParseQuery(string(body))
+	t.mu.Lock()
+	t.calls++
+	t.lastForm = form
+	status, email := t.status, t.email
+	t.mu.Unlock()
+
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+
+	payload, _ := json.Marshal(struct {
+		Email string `json:"email"`
+	}{Email: email})
+	jwt := "h." + base64.RawURLEncoding.EncodeToString(payload) + ".s"
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		IDToken string `json:"id_token"`
+	}{IDToken: jwt})
+}
+
+func (t *fakeTokenServer) Close() { t.srv.Close() }
+
+type DeviceUISuite struct {
+	suite.Suite
+
+	store    *statefulDeviceCodeStore
+	sessions *oidc.SessionManager
+	bsStore  *memBrowserSessionStore
+	ui       *oidc.DeviceUI
+	srv      *httptest.Server
+	tokenSrv *fakeTokenServer
+	client   *http.Client
+	clients  oidc.ClientRegistry
+	key      []byte
+}
+
+func TestDeviceUISuite(t *testing.T) {
+	suite.Run(t, new(DeviceUISuite))
+}
+
+func (s *DeviceUISuite) SetupTest() {
+	s.key = []byte("0123456789abcdef0123456789abcdef")
+
+	s.store = newStatefulDeviceCodeStore()
+	s.store.put(oidc.DeviceCode{
+		Code:            "fixed-device-code",
+		UserCode:        deviceUITestUserCanonical,
+		ClientID:        "tempogate-device",
+		Scope:           "openid email",
+		IntervalSeconds: 5,
+		CreatedAt:       deviceUINow,
+		ExpiresAt:       deviceUINow.Add(15 * time.Minute),
+	})
+
+	s.bsStore = newMemBrowserSessionStore()
+	s.sessions = oidc.NewSessionManager(s.bsStore, s.key,
+		oidc.WithSessionClock(func() time.Time { return deviceUINow }),
+		oidc.WithSessionTTL(5*time.Minute),
+		oidc.WithSessionSIDGenerator(func() (string, error) { return deviceUITestSID, nil }),
+	)
+
+	reg, err := oidc.ParseClientRegistry(deviceUIClientsRaw)
+	s.Require().NoError(err)
+	s.Require().NoError(reg.WithSecrets("tempogate-device-ui:" + deviceUIInternalSecret))
+	s.clients = reg
+
+	s.tokenSrv = newFakeTokenServer(deviceUITestEmail)
+
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
+		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
+		oidc.WithInternalTokenURL(s.tokenSrv.srv.URL),
+	)
+	s.Require().NoError(err)
+	s.ui = ui
+
+	mux := http.NewServeMux()
+	s.ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-test", "0.0.0")))
+	s.srv = httptest.NewServer(mux)
+
+	s.client = &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func (s *DeviceUISuite) TearDownTest() {
+	s.srv.Close()
+	s.tokenSrv.Close()
+}
+
+// seedSession injects a valid signed cookie into a request so the handler's
+// SessionManager.Get path resolves to a live session without going through
+// the SSO bounce. The cookie value mirrors what SessionManager.IssueCookie
+// would produce: base64url(sid).base64url(HMAC-SHA256(key, sid)).
+func (s *DeviceUISuite) seedSession() string {
+	s.Require().NoError(s.bsStore.SaveBrowserSession(context.Background(), oidc.BrowserSession{
+		SID:       deviceUITestSID,
+		Email:     deviceUITestEmail,
+		CreatedAt: deviceUINow,
+		ExpiresAt: deviceUINow.Add(5 * time.Minute),
+	}))
+	rec := httptest.NewRecorder()
+	_, cookie, err := s.sessions.IssueCookie(context.Background(), deviceUITestEmail)
+	s.Require().NoError(err)
+	rec.Header().Set("Set-Cookie", cookie.String())
+	return cookie.String()
+}
+
+func (s *DeviceUISuite) req(method, path string) *http.Request {
+	r, err := http.NewRequest(method, s.srv.URL+path, http.NoBody)
+	s.Require().NoError(err)
+	return r
+}
+
+func (s *DeviceUISuite) post(path string, form url.Values) *http.Request {
+	r, err := http.NewRequest(http.MethodPost, s.srv.URL+path, strings.NewReader(form.Encode()))
+	s.Require().NoError(err)
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Origin defaults to the issuer so the same-origin check passes; tests
+	// that exercise the rejection path overwrite it explicitly.
+	r.Header.Set("Origin", testIssuer)
+	return r
+}
+
+// TestEnterGetRendersForm covers the happy path of GET /device with no
+// prefill: the form renders as text/html with no-store, contains the input
+// element, and does not leak any prefilled value.
+func (s *DeviceUISuite) TestEnterGetRendersForm() {
+	resp, err := s.client.Do(s.req(http.MethodGet, "/device"))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+	s.Contains(resp.Header.Get("Content-Type"), "text/html")
+	s.Equal("no-store", resp.Header.Get("Cache-Control"))
+
+	body := readBody(s.T(), resp)
+	s.Contains(body, `name="user_code"`)
+	s.NotContains(body, `value="BCDF-GHJK"`)
+}
+
+// TestEnterGetPrefillsFromQueryString covers the verification_uri_complete
+// hop: ?user_code=BCDF-GHJK seeds the form's input value with the dashed
+// display form, even though the canonical form is what gets persisted.
+func (s *DeviceUISuite) TestEnterGetPrefillsFromQueryString() {
+	resp, err := s.client.Do(s.req(http.MethodGet, "/device?user_code=BCDF-GHJK"))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+
+	body := readBody(s.T(), resp)
+	s.Contains(body, `value="BCDF-GHJK"`)
+}
+
+// TestEnterPostWithSessionGoesStraightToConfirm: when the browser already
+// carries a valid session cookie, the POST short-circuits the upstream
+// bounce and 303s straight to /device/confirm.
+func (s *DeviceUISuite) TestEnterPostWithSessionGoesStraightToConfirm() {
+	cookieValue := s.seedSession()
+
+	r := s.post("/device", url.Values{"user_code": {deviceUITestUserDisplay}})
+	r.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusSeeOther, resp.StatusCode)
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	s.Require().NoError(err)
+	s.Equal("/device/confirm", loc.Path)
+	s.Equal(deviceUITestUserDisplay, loc.Query().Get("user_code"))
+}
+
+// TestEnterPostNoSessionBouncesThroughAuthorize: no session cookie ⇒ 303 to
+// /authorize?client_id=tempogate-device-ui&...&state=<signed-state>. The
+// state is HMAC-signed under the same key the SessionManager uses, so the
+// sso-callback can verify it back.
+func (s *DeviceUISuite) TestEnterPostNoSessionBouncesThroughAuthorize() {
+	r := s.post("/device", url.Values{"user_code": {deviceUITestUserDisplay}})
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusSeeOther, resp.StatusCode)
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	s.Require().NoError(err)
+	s.Equal(testIssuer+"/authorize", loc.Scheme+"://"+loc.Host+loc.Path)
+	q := loc.Query()
+	s.Equal("tempogate-device-ui", q.Get("client_id"))
+	s.Equal(testIssuer+"/device/sso-callback", q.Get("redirect_uri"))
+	s.Equal("code", q.Get("response_type"))
+	s.NotEmpty(q.Get("state"), "bounce state must be present")
+}
+
+func (s *DeviceUISuite) TestEnterPostErrorPaths() {
+	cases := []struct {
+		name      string
+		body      url.Values
+		setup     func()
+		wantMatch string
+	}{
+		{
+			name:      "missing user_code",
+			body:      url.Values{"filler": {"x"}},
+			wantMatch: "Enter the code",
+		},
+		{
+			name:      "unknown user_code",
+			body:      url.Values{"user_code": {"ZZZZ-ZZZZ"}},
+			wantMatch: "not active",
+		},
+		{
+			name: "expired user_code",
+			body: url.Values{"user_code": {deviceUITestUserDisplay}},
+			setup: func() {
+				s.store.put(oidc.DeviceCode{
+					Code:      "fixed-device-code",
+					UserCode:  deviceUITestUserCanonical,
+					ClientID:  "tempogate-device",
+					CreatedAt: deviceUINow.Add(-time.Hour),
+					ExpiresAt: deviceUINow.Add(-time.Minute),
+				})
+			},
+			wantMatch: "expired",
+		},
+		{
+			name: "already approved",
+			body: url.Values{"user_code": {deviceUITestUserDisplay}},
+			setup: func() {
+				stamp := deviceUINow
+				s.store.put(oidc.DeviceCode{
+					Code:       "fixed-device-code",
+					UserCode:   deviceUITestUserCanonical,
+					ClientID:   "tempogate-device",
+					CreatedAt:  deviceUINow,
+					ExpiresAt:  deviceUINow.Add(15 * time.Minute),
+					ApprovedAt: &stamp,
+				})
+			},
+			wantMatch: "already been used",
+		},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			if tc.setup != nil {
+				tc.setup()
+			}
+			resp, err := s.client.Do(s.post("/device", tc.body))
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.Equal(http.StatusOK, resp.StatusCode)
+			body := readBody(s.T(), resp)
+			s.Contains(body, tc.wantMatch)
+		})
+	}
+}
+
+// TestSSOCallbackHappyPath drives the loopback /token round-trip, asserts a
+// session row was minted, and confirms the response carries a session
+// cookie + 303 to /device/confirm with the recovered user_code.
+func (s *DeviceUISuite) TestSSOCallbackHappyPath() {
+	state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
+	resp, err := s.client.Do(s.req(http.MethodGet, "/device/sso-callback?code=auth-code&state="+url.QueryEscape(state)))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusSeeOther, resp.StatusCode)
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	s.Require().NoError(err)
+	s.Equal("/device/confirm", loc.Path)
+	s.Equal(deviceUITestUserDisplay, loc.Query().Get("user_code"))
+
+	cookies := resp.Cookies()
+	s.Require().Len(cookies, 1, "session cookie must be set on the redirect")
+	s.Equal("tempogate_session", cookies[0].Name)
+	s.True(cookies[0].HttpOnly)
+	s.True(cookies[0].Secure)
+
+	s.Equal(1, s.bsStore.count())
+	s.Equal(deviceUITestEmail, s.bsStore.only().Email)
+	s.Equal(1, s.tokenSrv.calls)
+	s.Equal("authorization_code", s.tokenSrv.lastForm.Get("grant_type"))
+	s.Equal(deviceUIInternalSecret, s.tokenSrv.lastForm.Get("client_secret"))
+}
+
+func (s *DeviceUISuite) TestSSOCallbackErrorPaths() {
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"missing code", "/device/sso-callback?state=anything"},
+		{"missing state", "/device/sso-callback?code=auth-code"},
+		{"unsigned state", "/device/sso-callback?code=auth-code&state=garbage"},
+		{
+			"expired state",
+			"/device/sso-callback?code=auth-code&state=" +
+				url.QueryEscape(signedBounceStateWithKey(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(-time.Hour).Unix(), s.key)),
+		},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			resp, err := s.client.Do(s.req(http.MethodGet, tc.path))
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.Equal(http.StatusOK, resp.StatusCode)
+			body := readBody(s.T(), resp)
+			s.Contains(body, "could not be completed")
+		})
+	}
+}
+
+func (s *DeviceUISuite) TestSSOCallbackTokenFailureRendersError() {
+	s.tokenSrv.mu.Lock()
+	s.tokenSrv.status = http.StatusBadRequest
+	s.tokenSrv.mu.Unlock()
+
+	state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
+	resp, err := s.client.Do(s.req(http.MethodGet, "/device/sso-callback?code=auth-code&state="+url.QueryEscape(state)))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusOK, resp.StatusCode)
+	body := readBody(s.T(), resp)
+	s.Contains(body, "could not be completed")
+	s.Zero(s.bsStore.count(), "no session must be minted when /token redemption fails")
+}
+
+func (s *DeviceUISuite) TestConfirmNoSessionRedirectsBack() {
+	resp, err := s.client.Do(s.req(http.MethodGet, "/device/confirm?user_code="+deviceUITestUserDisplay))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusSeeOther, resp.StatusCode)
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	s.Require().NoError(err)
+	s.Equal("/device", loc.Path)
+	s.Equal(deviceUITestUserDisplay, loc.Query().Get("user_code"))
+}
+
+func (s *DeviceUISuite) TestConfirmMissingUserCodeIsError() {
+	cookieValue := s.seedSession()
+	r := s.req(http.MethodGet, "/device/confirm")
+	r.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+	body := readBody(s.T(), resp)
+	s.Contains(body, "could not be completed")
+}
+
+func (s *DeviceUISuite) TestConfirmRendersApprovalForm() {
+	cookieValue := s.seedSession()
+	r := s.req(http.MethodGet, "/device/confirm?user_code="+deviceUITestUserDisplay)
+	r.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusOK, resp.StatusCode)
+	body := readBody(s.T(), resp)
+	s.Contains(body, deviceUITestUserDisplay, "display user_code must be visible to the human verifying it")
+	s.Contains(body, deviceUITestEmail)
+	s.Contains(body, `action="/device/approve"`)
+	s.Contains(body, `action="/device/deny"`)
+	s.Contains(body, `name="csrf_token" value="`+deviceUITestSID+`"`)
+}
+
+func (s *DeviceUISuite) TestApproveHappyPathFlipsRow() {
+	cookieValue := s.seedSession()
+	form := url.Values{"csrf_token": {deviceUITestSID}, "user_code": {deviceUITestUserDisplay}}
+	r := s.post("/device/approve", form)
+	r.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusOK, resp.StatusCode)
+	body := readBody(s.T(), resp)
+	s.Contains(body, "Device approved")
+
+	s.Equal(1, s.store.countApproved())
+	s.Zero(s.store.countDenied())
+}
+
+func (s *DeviceUISuite) TestDenyHappyPathFlipsRow() {
+	cookieValue := s.seedSession()
+	form := url.Values{"csrf_token": {deviceUITestSID}, "user_code": {deviceUITestUserDisplay}}
+	r := s.post("/device/deny", form)
+	r.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusOK, resp.StatusCode)
+	body := readBody(s.T(), resp)
+	s.Contains(body, "Device denied")
+
+	s.Zero(s.store.countApproved())
+	s.Equal(1, s.store.countDenied())
+}
+
+func (s *DeviceUISuite) TestDecisionRejectsBadInputs() {
+	cookieValue := s.seedSession()
+
+	cases := []struct {
+		name    string
+		mutate  func(*http.Request)
+		form    url.Values
+		wantMsg string
+	}{
+		{
+			name: "no session",
+			mutate: func(r *http.Request) {
+				r.Header.Del("Cookie")
+			},
+			form:    url.Values{"csrf_token": {deviceUITestSID}, "user_code": {deviceUITestUserDisplay}},
+			wantMsg: "expired",
+		},
+		{
+			name:    "mismatched csrf token",
+			form:    url.Values{"csrf_token": {"wrong"}, "user_code": {deviceUITestUserDisplay}},
+			wantMsg: "could not be verified",
+		},
+		{
+			name:    "missing csrf token",
+			form:    url.Values{"user_code": {deviceUITestUserDisplay}},
+			wantMsg: "could not be verified",
+		},
+		{
+			name: "wrong origin",
+			mutate: func(r *http.Request) {
+				r.Header.Set("Origin", "https://evil.example.com")
+			},
+			form:    url.Values{"csrf_token": {deviceUITestSID}, "user_code": {deviceUITestUserDisplay}},
+			wantMsg: "did not come from the expected page",
+		},
+		{
+			name: "missing origin and referer",
+			mutate: func(r *http.Request) {
+				r.Header.Del("Origin")
+				r.Header.Del("Referer")
+			},
+			form:    url.Values{"csrf_token": {deviceUITestSID}, "user_code": {deviceUITestUserDisplay}},
+			wantMsg: "did not come from the expected page",
+		},
+		{
+			name:    "missing user_code",
+			form:    url.Values{"csrf_token": {deviceUITestSID}},
+			wantMsg: "missing the device code",
+		},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			r := s.post("/device/approve", tc.form)
+			r.Header.Set("Cookie", cookieValue)
+			if tc.mutate != nil {
+				tc.mutate(r)
+			}
+			resp, err := s.client.Do(r)
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.Equal(http.StatusOK, resp.StatusCode)
+			body := readBody(s.T(), resp)
+			s.Contains(body, tc.wantMsg)
+			s.Zero(s.store.countApproved(), "no row may be flipped on a rejected request")
+		})
+	}
+}
+
+func (s *DeviceUISuite) TestApproveOnAlreadyDecidedRowSurfacesAsError() {
+	cookieValue := s.seedSession()
+	// Pre-flip the row so Approve sees ErrDeviceCodeNotPending.
+	stamp := deviceUINow
+	s.store.put(oidc.DeviceCode{
+		Code:       "fixed-device-code",
+		UserCode:   deviceUITestUserCanonical,
+		ClientID:   "tempogate-device",
+		CreatedAt:  deviceUINow,
+		ExpiresAt:  deviceUINow.Add(15 * time.Minute),
+		ApprovedAt: &stamp,
+	})
+
+	form := url.Values{"csrf_token": {deviceUITestSID}, "user_code": {deviceUITestUserDisplay}}
+	r := s.post("/device/approve", form)
+	r.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusOK, resp.StatusCode)
+	body := readBody(s.T(), resp)
+	s.Contains(body, "already been used")
+}
+
+func (s *DeviceUISuite) TestApproveOnUnknownRowSurfacesAsError() {
+	cookieValue := s.seedSession()
+	s.store.lookupErr = nil
+	// Use a user_code that is not in the store.
+	form := url.Values{"csrf_token": {deviceUITestSID}, "user_code": {"ZZZZ-ZZZZ"}}
+	r := s.post("/device/approve", form)
+	r.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusOK, resp.StatusCode)
+	body := readBody(s.T(), resp)
+	s.Contains(body, "not active")
+}
+
+// TestConfirmExpiredOrDecidedRowIsError covers handleConfirm's expired
+// and already-used branches — both reachable only after a real session
+// has been minted, so the unit-test suite drives them with a seeded
+// session + a pre-flipped row.
+func (s *DeviceUISuite) TestConfirmExpiredOrDecidedRowIsError() {
+	cookieValue := s.seedSession()
+
+	cases := []struct {
+		name string
+		put  oidc.DeviceCode
+		want string
+	}{
+		{
+			name: "expired row",
+			put: oidc.DeviceCode{
+				Code:      "fixed-device-code",
+				UserCode:  deviceUITestUserCanonical,
+				ClientID:  "tempogate-device",
+				CreatedAt: deviceUINow.Add(-time.Hour),
+				ExpiresAt: deviceUINow.Add(-time.Minute),
+			},
+			want: "expired",
+		},
+		{
+			name: "already approved",
+			put: oidc.DeviceCode{
+				Code:       "fixed-device-code",
+				UserCode:   deviceUITestUserCanonical,
+				ClientID:   "tempogate-device",
+				CreatedAt:  deviceUINow,
+				ExpiresAt:  deviceUINow.Add(15 * time.Minute),
+				ApprovedAt: ptr(deviceUINow),
+			},
+			want: "already been used",
+		},
+		{
+			name: "already denied",
+			put: oidc.DeviceCode{
+				Code:      "fixed-device-code",
+				UserCode:  deviceUITestUserCanonical,
+				ClientID:  "tempogate-device",
+				CreatedAt: deviceUINow,
+				ExpiresAt: deviceUINow.Add(15 * time.Minute),
+				DeniedAt:  ptr(deviceUINow),
+			},
+			want: "already been used",
+		},
+		{
+			name: "unknown row",
+			put: oidc.DeviceCode{
+				Code:      "fixed-device-code",
+				UserCode:  "ZZZZZZZZ", // canonical for the suite is BCDFGHJK, so this row is unreachable by the path
+				ClientID:  "tempogate-device",
+				CreatedAt: deviceUINow,
+				ExpiresAt: deviceUINow.Add(15 * time.Minute),
+			},
+			want: "not active",
+		},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			s.store.byUser = map[string]oidc.DeviceCode{tc.put.UserCode: tc.put}
+			r := s.req(http.MethodGet, "/device/confirm?user_code="+deviceUITestUserDisplay)
+			r.Header.Set("Cookie", cookieValue)
+			resp, err := s.client.Do(r)
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.Equal(http.StatusOK, resp.StatusCode)
+			s.Contains(readBody(s.T(), resp), tc.want)
+		})
+	}
+}
+
+// TestSSOCallbackTokenResponseShapes covers the three id_token-shape error
+// branches inside redeemAuthCode: empty id_token, malformed JWT (no
+// dotted segments), and a token whose payload lacks an email claim.
+func (s *DeviceUISuite) TestSSOCallbackTokenResponseShapes() {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty id_token", `{"id_token":""}`},
+		{"malformed jwt", `{"id_token":"not-a-dotted-jwt"}`},
+		{"missing email claim", `{"id_token":"h.` + base64.RawURLEncoding.EncodeToString([]byte(`{}`)) + `.s"}`},
+		{"bad json", `not json`},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+				oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
+				oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
+				oidc.WithInternalTokenURL(srv.URL),
+			)
+			s.Require().NoError(err)
+			mux := http.NewServeMux()
+			ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-shape", "0.0.0")))
+			localSrv := httptest.NewServer(mux)
+			defer localSrv.Close()
+
+			state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
+			resp, err := s.client.Get(localSrv.URL + "/device/sso-callback?code=auth-code&state=" + url.QueryEscape(state))
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.Equal(http.StatusOK, resp.StatusCode)
+			s.Contains(readBody(s.T(), resp), "could not be completed")
+			s.Zero(s.bsStore.count())
+		})
+	}
+}
+
+// TestEnterPostStateGeneratorErrorIsServerError exercises the bounce-state
+// nonce path where the generator returns an error. Such a failure can't
+// downgrade into a redirect — it must surface as a server-side 5xx.
+func (s *DeviceUISuite) TestEnterPostStateGeneratorErrorIsServerError() {
+	failing, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
+		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return "", errors.New("entropy exhausted") }),
+		oidc.WithInternalTokenURL(s.tokenSrv.srv.URL),
+	)
+	s.Require().NoError(err)
+	mux := http.NewServeMux()
+	failing.Register(humago.New(mux, huma.DefaultConfig("device-ui-failnonce", "0.0.0")))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r, err := http.NewRequest(http.MethodPost, srv.URL+"/device",
+		strings.NewReader(url.Values{"user_code": {deviceUITestUserDisplay}}.Encode()))
+	s.Require().NoError(err)
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Origin", testIssuer)
+
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusInternalServerError, resp.StatusCode)
+}
+
+// TestOriginAllowedFallsBackToReferer pins the second half of the
+// same-origin gate: when Origin is absent but Referer carries the issuer
+// prefix, the POST is accepted. The Decision tests already pin the
+// rejection paths.
+func (s *DeviceUISuite) TestOriginAllowedFallsBackToReferer() {
+	cookieValue := s.seedSession()
+	form := url.Values{"csrf_token": {deviceUITestSID}, "user_code": {deviceUITestUserDisplay}}
+	r := s.post("/device/approve", form)
+	r.Header.Set("Cookie", cookieValue)
+	r.Header.Del("Origin")
+	r.Header.Set("Referer", testIssuer+"/device/confirm?user_code="+deviceUITestUserDisplay)
+
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+	s.Contains(readBody(s.T(), resp), "Device approved")
+	s.Equal(1, s.store.countApproved())
+}
+
+// TestCanonicalUserCodeStripsAndUppercases pins the lookup normalisation:
+// any combination of whitespace, dashes, lowercase, and unrecognised
+// punctuation collapses to the upper-case dash-free form the store
+// indexes on. Driven through the public POST /device handler because the
+// helper is unexported.
+func (s *DeviceUISuite) TestCanonicalUserCodeStripsAndUppercases() {
+	cases := []string{
+		"bcdf-ghjk",       // lowercase + dash
+		" BCDF GHJK ",     // spaces
+		"BCDF\t-GHJK",     // tab + dash
+		"B C D F G H J K", // every-char-spaced
+		"BCDF.GHJK!",      // unrecognised punctuation
+	}
+	cookieValue := s.seedSession()
+	for _, raw := range cases {
+		s.Run(raw, func() {
+			r := s.post("/device", url.Values{"user_code": {raw}})
+			r.Header.Set("Cookie", cookieValue)
+			resp, err := s.client.Do(r)
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			// With a valid session the canonical lookup hits the seeded row
+			// and 303s to /device/confirm rather than rendering the error
+			// page. Any normalisation regression would 404 here.
+			s.Equal(http.StatusSeeOther, resp.StatusCode)
+			loc, err := url.Parse(resp.Header.Get("Location"))
+			s.Require().NoError(err)
+			s.Equal("/device/confirm", loc.Path)
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// TestMalformedBodyOnPostsIsErrorPage covers handleEnterPost and
+// handleDecision's form-parse error branches. Huma already screens an
+// empty body with a 400; the path that reaches the parse call is a body
+// that decodes but contains invalid percent-encoding.
+func (s *DeviceUISuite) TestMalformedBodyOnPostsIsErrorPage() {
+	cookieValue := s.seedSession()
+	bad := "user_code=%zz%"
+
+	cases := []struct{ name, path string }{
+		{"POST /device", "/device"},
+		{"POST /device/approve", "/device/approve"},
+		{"POST /device/deny", "/device/deny"},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			r, err := http.NewRequest(http.MethodPost, s.srv.URL+tc.path, strings.NewReader(bad))
+			s.Require().NoError(err)
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			r.Header.Set("Origin", testIssuer)
+			r.Header.Set("Cookie", cookieValue)
+			resp, err := s.client.Do(r)
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.Equal(http.StatusOK, resp.StatusCode)
+			s.Contains(readBody(s.T(), resp), "malformed")
+		})
+	}
+}
+
+// TestStoreLookupErrorIs500 covers the not-ErrDeviceCodeNotFound branches
+// in handleEnterPost and handleConfirm where the store returns an
+// unexpected error. The handler surfaces a 5xx rather than a misleading
+// error page so an operator's monitoring sees the underlying issue.
+func (s *DeviceUISuite) TestStoreLookupErrorIs500() {
+	boom := errors.New("disk fell off")
+	s.store.lookupErr = boom
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		cookie bool
+	}{
+		{"POST /device", http.MethodPost, "/device", "user_code=" + deviceUITestUserDisplay, false},
+		{"GET /device/confirm", http.MethodGet, "/device/confirm?user_code=" + deviceUITestUserDisplay, "", true},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			var r *http.Request
+			var err error
+			if tc.body != "" {
+				r, err = http.NewRequest(tc.method, s.srv.URL+tc.path, strings.NewReader(tc.body))
+				r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				r.Header.Set("Origin", testIssuer)
+			} else {
+				r, err = http.NewRequest(tc.method, s.srv.URL+tc.path, http.NoBody)
+			}
+			s.Require().NoError(err)
+			if tc.cookie {
+				r.Header.Set("Cookie", s.seedSession())
+			}
+			resp, err := s.client.Do(r)
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.Equal(http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
+// TestSessionUnexpectedLookupErrorIs500 mirrors the device-store sibling
+// for the session-store error path: a non-ErrNoSession error must not
+// collapse into a redirect or error page.
+func (s *DeviceUISuite) TestSessionUnexpectedLookupErrorIs500() {
+	s.bsStore.lookupErr = errors.New("session store sick")
+	// Build a syntactically-valid cookie so the lookup is actually invoked.
+	cookieValue := s.seedSession()
+	s.bsStore.lookupErr = errors.New("session store sick")
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"POST /device", http.MethodPost, "/device", "user_code=" + deviceUITestUserDisplay},
+		{"GET /device/confirm", http.MethodGet, "/device/confirm?user_code=" + deviceUITestUserDisplay, ""},
+		{"POST /device/approve", http.MethodPost, "/device/approve", "csrf_token=" + deviceUITestSID + "&user_code=" + deviceUITestUserDisplay},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			var r *http.Request
+			var err error
+			if tc.body != "" {
+				r, err = http.NewRequest(tc.method, s.srv.URL+tc.path, strings.NewReader(tc.body))
+				s.Require().NoError(err)
+				r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				r.Header.Set("Origin", testIssuer)
+			} else {
+				r, err = http.NewRequest(tc.method, s.srv.URL+tc.path, http.NoBody)
+				s.Require().NoError(err)
+			}
+			r.Header.Set("Cookie", cookieValue)
+
+			resp, err := s.client.Do(r)
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.Equal(http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
+// TestNewDeviceUITreatsBadIssuerSafely guards originPrefix's "issuer
+// does not parse" branch. A device-ui constructed with a non-URL issuer
+// still serves the rendered pages, but its Origin gate fails closed so a
+// misconfigured server can never accept the Approve form.
+func (s *DeviceUISuite) TestNewDeviceUITreatsBadIssuerSafely() {
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, ":::not-a-url",
+		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
+		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
+		oidc.WithInternalTokenURL(s.tokenSrv.srv.URL),
+	)
+	s.Require().NoError(err, "NewDeviceUI should not fail on a syntactically odd issuer")
+	mux := http.NewServeMux()
+	ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-badissuer", "0.0.0")))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cookieValue := s.seedSession()
+	r, err := http.NewRequest(http.MethodPost, srv.URL+"/device/approve",
+		strings.NewReader(url.Values{"csrf_token": {deviceUITestSID}, "user_code": {deviceUITestUserDisplay}}.Encode()))
+	s.Require().NoError(err)
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Cookie", cookieValue)
+	r.Header.Set("Origin", testIssuer)
+
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+	s.Contains(readBody(s.T(), resp), "did not come from the expected page",
+		"a parseable Origin against an unparseable issuer must fail closed")
+}
+
+// TestSSOCallbackVerifyBounceStateBranches drives the remaining
+// verifyBounceState rejection paths — bad MAC, bad payload base64, bad
+// MAC base64, JSON that won't decode, and a payload missing the
+// user_code. Each must collapse to the same generic error page so a
+// probe can't fingerprint which check tripped.
+func (s *DeviceUISuite) TestSSOCallbackVerifyBounceStateBranches() {
+	validPayload := func(canonical string, exp int64) []byte {
+		b, _ := json.Marshal(struct {
+			UserCode string `json:"user_code"`
+			Nonce    string `json:"nonce"`
+			Exp      int64  `json:"exp"`
+		}{UserCode: canonical, Nonce: deviceUITestStateNonce, Exp: exp})
+		return b
+	}
+
+	wrongKey := []byte("ffffffffffffffffffffffffffffffff")
+
+	cases := []struct {
+		name  string
+		state string
+	}{
+		{
+			"bad MAC",
+			signedBounceStateWithKey(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix(), wrongKey),
+		},
+		{
+			"payload not base64",
+			"!!!." + base64.RawURLEncoding.EncodeToString(hmacOf(s.key, []byte("anything"))),
+		},
+		{
+			"mac not base64",
+			base64.RawURLEncoding.EncodeToString(validPayload(deviceUITestUserCanonical, deviceUINow.Add(time.Minute).Unix())) + ".!!!",
+		},
+		{
+			"payload not JSON",
+			func() string {
+				raw := []byte("not-json-at-all")
+				return base64.RawURLEncoding.EncodeToString(raw) + "." +
+					base64.RawURLEncoding.EncodeToString(hmacOf(s.key, raw))
+			}(),
+		},
+		{
+			"empty user_code",
+			func() string {
+				raw := validPayload("", deviceUINow.Add(time.Minute).Unix())
+				return base64.RawURLEncoding.EncodeToString(raw) + "." +
+					base64.RawURLEncoding.EncodeToString(hmacOf(s.key, raw))
+			}(),
+		},
+	}
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			resp, err := s.client.Get(s.srv.URL + "/device/sso-callback?code=auth-code&state=" + url.QueryEscape(tc.state))
+			s.Require().NoError(err)
+			defer resp.Body.Close()
+			s.Equal(http.StatusOK, resp.StatusCode)
+			s.Contains(readBody(s.T(), resp), "could not be completed")
+		})
+	}
+}
+
+// TestSSOCallbackBadJWTPayloadJSON covers the json.Unmarshal-of-claims
+// branch in redeemAuthCode: a token whose payload base64-decodes to bytes
+// that are NOT valid JSON. Distinct from the "missing email" path —
+// here even the structural decode fails.
+func (s *DeviceUISuite) TestSSOCallbackBadJWTPayloadJSON() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Payload segment decodes to "not-json" — JSON unmarshal fails.
+		jwt := "h." + base64.RawURLEncoding.EncodeToString([]byte("not-json")) + ".s"
+		_, _ = io.WriteString(w, `{"id_token":"`+jwt+`"}`)
+	}))
+	defer srv.Close()
+
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
+		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
+		oidc.WithInternalTokenURL(srv.URL),
+	)
+	s.Require().NoError(err)
+	mux := http.NewServeMux()
+	ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-badjson", "0.0.0")))
+	local := httptest.NewServer(mux)
+	defer local.Close()
+
+	state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
+	resp, err := s.client.Get(local.URL + "/device/sso-callback?code=auth-code&state=" + url.QueryEscape(state))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+	s.Contains(readBody(s.T(), resp), "could not be completed")
+	s.Zero(s.bsStore.count())
+}
+
+// TestSSOCallbackUnreachableTokenServer covers the http.Client.Do error
+// path inside redeemAuthCode — exercised by pointing the device-ui at a
+// localhost:0 token URL that never accepts connections.
+func (s *DeviceUISuite) TestSSOCallbackUnreachableTokenServer() {
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
+		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
+		// Closed loopback port — Do() fails with connection refused.
+		oidc.WithInternalTokenURL("http://127.0.0.1:1/token"),
+		oidc.WithDeviceUIHTTPClient(&http.Client{Timeout: 100 * time.Millisecond}),
+	)
+	s.Require().NoError(err)
+	mux := http.NewServeMux()
+	ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-deadtoken", "0.0.0")))
+	local := httptest.NewServer(mux)
+	defer local.Close()
+
+	state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
+	resp, err := s.client.Get(local.URL + "/device/sso-callback?code=auth-code&state=" + url.QueryEscape(state))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+	s.Contains(readBody(s.T(), resp), "could not be completed")
+}
+
+// TestDecisionStoreErrorIs500 covers the non-sentinel error branch out of
+// ApproveDeviceCode / DenyDeviceCode: a deep store failure surfaces as a
+// 5xx, not a 200 error page, so an operator's monitoring sees it.
+func (s *DeviceUISuite) TestDecisionStoreErrorIs500() {
+	cookieValue := s.seedSession()
+	s.store.approveErr = errors.New("disk fell off")
+
+	r := s.post("/device/approve",
+		url.Values{"csrf_token": {deviceUITestSID}, "user_code": {deviceUITestUserDisplay}})
+	r.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusInternalServerError, resp.StatusCode)
+}
+
+// TestTemplatesEmitNoExternalAssets pins the CSP-tight contract: no
+// rendered page may reference an external stylesheet or script — the
+// templates are self-contained so a Content-Security-Policy that forbids
+// external loads doesn't break the page.
+func (s *DeviceUISuite) TestTemplatesEmitNoExternalAssets() {
+	cookieValue := s.seedSession()
+
+	// Render the confirm page (most chrome).
+	r := s.req(http.MethodGet, "/device/confirm?user_code="+deviceUITestUserDisplay)
+	r.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(r)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	body := readBody(s.T(), resp)
+	s.NotContains(body, `<link rel="stylesheet"`)
+	s.NotContains(body, `<script src=`)
+	s.NotContains(body, `https://`, "no external resource URLs may appear in the rendered page")
+}
+
+func TestNewDeviceUIRejectsMissingInternalClient(t *testing.T) {
+	reg, err := oidc.ParseClientRegistry("tempogate-device:cli")
+	if err != nil {
+		t.Fatalf("parse clients: %v", err)
+	}
+	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
+	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, []byte("0123456789abcdef0123456789abcdef"), testIssuer)
+	if !errors.Is(err, oidc.ErrInternalDeviceUIClientMissing) {
+		t.Fatalf("expected ErrInternalDeviceUIClientMissing, got %v", err)
+	}
+}
+
+func TestNewDeviceUIRejectsPublicInternalClient(t *testing.T) {
+	reg, err := oidc.ParseClientRegistry(deviceUIClientsRaw)
+	if err != nil {
+		t.Fatalf("parse clients: %v", err)
+	}
+	// Skip WithSecrets — the device-ui client stays public, which is the
+	// misconfiguration this asserts is caught.
+	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
+	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, []byte("0123456789abcdef0123456789abcdef"), testIssuer)
+	if !errors.Is(err, oidc.ErrInternalDeviceUIClientNotConfidential) {
+		t.Fatalf("expected ErrInternalDeviceUIClientNotConfidential, got %v", err)
+	}
+}
+
+func TestNewDeviceUIAcceptsCustomInternalClientID(t *testing.T) {
+	reg, err := oidc.ParseClientRegistry("tempogate-device:cli,my-custom-ui:" + testIssuer + "/device/sso-callback")
+	if err != nil {
+		t.Fatalf("parse clients: %v", err)
+	}
+	if err := reg.WithSecrets("my-custom-ui:" + deviceUIInternalSecret); err != nil {
+		t.Fatalf("with secrets: %v", err)
+	}
+	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
+	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, []byte("0123456789abcdef0123456789abcdef"), testIssuer,
+		oidc.WithInternalClientID("my-custom-ui"))
+	if err != nil {
+		t.Fatalf("custom client id should be honoured: %v", err)
+	}
+}
+
+// signedBounceState mirrors the production state-signing path with the
+// suite's signing key, so tests forge a state value that the DeviceUI
+// accepts without exporting the internal signing helper.
+func (s *DeviceUISuite) signedBounceState(canonical, nonce string, exp int64) string {
+	return signedBounceStateWithKey(canonical, nonce, exp, s.key)
+}
+
+func signedBounceStateWithKey(canonical, nonce string, exp int64, key []byte) string {
+	payload, _ := json.Marshal(struct {
+		UserCode string `json:"user_code"`
+		Nonce    string `json:"nonce"`
+		Exp      int64  `json:"exp"`
+	}{UserCode: canonical, Nonce: nonce, Exp: exp})
+	mac := hmacOf(key, payload)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." +
+		base64.RawURLEncoding.EncodeToString(mac)
+}
+
+func hmacOf(key, payload []byte) []byte {
+	h := stdHMACSHA256(key)
+	_, _ = h.Write(payload)
+	return h.Sum(nil)
+}
+
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(b)
+}

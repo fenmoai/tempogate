@@ -148,9 +148,23 @@ func NewSessionManager(store BrowserSessionStore, signingKey []byte, opts ...Ses
 // callers that need to correlate audit logs with the cookie can stash it
 // without re-parsing the response.
 func (m *SessionManager) Issue(ctx context.Context, w http.ResponseWriter, email string) (string, error) {
+	sid, cookie, err := m.IssueCookie(ctx, email)
+	if err != nil {
+		return "", err
+	}
+	http.SetCookie(w, cookie)
+	return sid, nil
+}
+
+// IssueCookie is the writer-free variant of Issue: it mints the session row
+// and returns the cookie the caller must add to the response itself. Huma
+// typed handlers don't own the raw http.ResponseWriter, so they assemble the
+// Set-Cookie header through their typed output struct using this method.
+// The two paths cannot drift because Issue is a thin wrapper around it.
+func (m *SessionManager) IssueCookie(ctx context.Context, email string) (string, *http.Cookie, error) {
 	sid, err := m.newSID()
 	if err != nil {
-		return "", fmt.Errorf("oidc: generate session sid: %w", err)
+		return "", nil, fmt.Errorf("oidc: generate session sid: %w", err)
 	}
 
 	now := m.now()
@@ -161,10 +175,10 @@ func (m *SessionManager) Issue(ctx context.Context, w http.ResponseWriter, email
 		ExpiresAt: now.Add(m.ttl),
 	}
 	if err := m.store.SaveBrowserSession(ctx, bs); err != nil {
-		return "", fmt.Errorf("oidc: persist browser session: %w", err)
+		return "", nil, fmt.Errorf("oidc: persist browser session: %w", err)
 	}
 
-	http.SetCookie(w, &http.Cookie{
+	return sid, &http.Cookie{
 		Name:     m.cookie.name,
 		Value:    m.signCookie(sid),
 		Path:     m.cookie.path,
@@ -172,8 +186,7 @@ func (m *SessionManager) Issue(ctx context.Context, w http.ResponseWriter, email
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(m.ttl.Seconds()),
-	})
-	return sid, nil
+	}, nil
 }
 
 // Get reads the session cookie off r, verifies its signature, looks up the
