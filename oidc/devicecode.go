@@ -1,6 +1,32 @@
 package oidc
 
-import "time"
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// ErrDeviceCodeNotFound is returned by a lookup or consume that finds no row
+// — because the row was never written, was already consumed, or was reaped.
+// The /token device_code grant maps this to OAuth2 invalid_grant; the
+// verification page maps it to a 404 without distinguishing the cases so a
+// caller cannot probe which user_codes are in use.
+var ErrDeviceCodeNotFound = errors.New("oidc: device code not found")
+
+// ErrDuplicateDeviceCode is returned by SaveDeviceCode when a row with the
+// same device_code (PK) or user_code (UNIQUE) already exists. It is the
+// consumer-side sentinel the /device_authorization handler matches via
+// errors.Is so its regeneration loop is decoupled from the concrete store
+// type; *sqlite.Store wraps this through its own typed sentinel.
+var ErrDuplicateDeviceCode = errors.New("oidc: duplicate device code")
+
+// ErrDeviceCodeNotPending is returned by Approve / Deny when the targeted
+// row exists but is no longer in the pending state — its approved_at or
+// denied_at is already stamped. The verification handler maps this to the
+// same "already decided" response a second click on Approve or an Approve
+// after Deny would produce, so the UI cannot be coaxed into flipping a
+// decision by re-submitting the form.
+var ErrDeviceCodeNotPending = errors.New("oidc: device code already approved or denied")
 
 // DeviceCode is the per-flow row backing RFC 8628 — OAuth 2.0 Device
 // Authorization Grant. It is created when a headless client posts to
@@ -33,4 +59,56 @@ type DeviceCode struct {
 
 	CreatedAt time.Time
 	ExpiresAt time.Time
+}
+
+// DeviceCodeStore is the consumer-side state interface for the RFC 8628
+// device-authorization grant (see state/doc.go). It carries every operation
+// the three handler stages — /device_authorization (this PR),
+// /token?grant_type=device_code, and the verification UI — need against the
+// device_codes table; declaring them in one place keeps the contract
+// discoverable without forcing each child handler to re-declare a near-
+// duplicate narrow interface. The concrete *sqlite.Store satisfies it
+// structurally; the type is exported only so the composition root can inject
+// it via fx.As.
+type DeviceCodeStore interface {
+	// SaveDeviceCode persists a freshly minted device-flow row. A collision
+	// on either device_code (PK) or user_code (UNIQUE) returns the store's
+	// duplicate sentinel; the issuer's retry loop regenerates both halves
+	// rather than picking a side, since user_code collisions are the only
+	// realistic case (24^8 vs. device_code's 2^256) and the cost of
+	// regenerating the device_code on the unlikely PK collision is zero.
+	SaveDeviceCode(ctx context.Context, dc DeviceCode) error
+
+	// LookupDeviceCodeByDeviceCode reads the row by its long machine-side
+	// token (the poll path). Non-destructive. Returns ErrDeviceCodeNotFound
+	// on zero rows.
+	LookupDeviceCodeByDeviceCode(ctx context.Context, deviceCode string) (DeviceCode, error)
+
+	// LookupDeviceCodeByUserCode reads the row by its short human-typeable
+	// token (the verification-page path). Caller normalises (uppercase,
+	// strip dashes) before calling; the column is stored already
+	// normalised. Non-destructive. Returns ErrDeviceCodeNotFound on zero
+	// rows.
+	LookupDeviceCodeByUserCode(ctx context.Context, userCode string) (DeviceCode, error)
+
+	// TouchDeviceCodePoll records the latest poll timestamp and, when
+	// bumpInterval is true, raises the server-tracked minimum-poll-interval
+	// by the RFC 8628 §3.5 increment (+5 seconds). The /token handler calls
+	// this on every device-code poll; well-behaved clients never pay the
+	// penalty.
+	TouchDeviceCodePoll(ctx context.Context, deviceCode string, now time.Time, bumpInterval bool) error
+
+	// ApproveDeviceCode atomically stamps the row as approved by email only
+	// when it is still pending. Zero rows affected ⇒ ErrDeviceCodeNotPending.
+	ApproveDeviceCode(ctx context.Context, userCode, email string, now time.Time) error
+
+	// DenyDeviceCode atomically stamps the row as denied only when it is
+	// still pending. Zero rows affected ⇒ ErrDeviceCodeNotPending.
+	DenyDeviceCode(ctx context.Context, userCode string, now time.Time) error
+
+	// ConsumeDeviceCode atomically deletes and returns the row, mirroring
+	// ConsumeAuthCode: the loser of a concurrent poll sees zero rows and
+	// gets ErrDeviceCodeNotFound. Called only on the final token-mint path,
+	// after an Approve has stamped the row.
+	ConsumeDeviceCode(ctx context.Context, deviceCode string) (DeviceCode, error)
 }

@@ -119,6 +119,7 @@ func (s *WellKnownSuite) TestOpenIDConfigurationIsFullyPopulated() {
 		AuthorizationEndpoint            string   `json:"authorization_endpoint"`
 		TokenEndpoint                    string   `json:"token_endpoint"`
 		UserinfoEndpoint                 string   `json:"userinfo_endpoint"`
+		DeviceAuthorizationEndpoint      string   `json:"device_authorization_endpoint"`
 		JwksURI                          string   `json:"jwks_uri"`
 		ResponseTypesSupported           []string `json:"response_types_supported"`
 		GrantTypesSupported              []string `json:"grant_types_supported"`
@@ -133,8 +134,15 @@ func (s *WellKnownSuite) TestOpenIDConfigurationIsFullyPopulated() {
 	s.Equal(s.issuer+"/authorize", doc.AuthorizationEndpoint)
 	s.Equal(s.issuer+"/token", doc.TokenEndpoint)
 	s.Equal(s.issuer+"/userinfo", doc.UserinfoEndpoint)
+	// RFC 8628 §4 — discovery metadata for the device authorization
+	// endpoint, advertised here so CLI / SDK callers can discover it
+	// without a hard-coded path.
+	s.Equal(s.issuer+"/device_authorization", doc.DeviceAuthorizationEndpoint)
 	s.Equal(s.issuer+"/.well-known/jwks.json", doc.JwksURI)
 	s.Equal([]string{"code"}, doc.ResponseTypesSupported)
+	// device_code grant is intentionally absent from grant_types_supported
+	// until /token grows the device_code branch — advertising before then
+	// would lie to RFC-conformant clients.
 	s.Equal([]string{"authorization_code", "refresh_token"}, doc.GrantTypesSupported)
 	s.Equal([]string{"S256"}, doc.CodeChallengeMethodsSupported)
 	s.Equal([]string{"openid", "profile", "email"}, doc.ScopesSupported)
