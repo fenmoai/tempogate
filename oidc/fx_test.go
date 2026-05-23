@@ -2,6 +2,7 @@ package oidc_test
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -106,6 +107,50 @@ func (s *FxSuite) TestDeviceAuthorizationIsWiredIntoPublicAPI() {
 	defer resp.Body.Close()
 	s.NotEqual(http.StatusNotFound, resp.StatusCode,
 		"POST /device_authorization must be registered against the public huma API")
+}
+
+// TestTokenDeviceCodeBranchIsWired is the registration regression guard for
+// the device-code grant on /token: graph construction must inject the
+// DeviceCodeStore into tokenParams, and a POST with the RFC 8628 grant_type
+// must reach the device branch (which, with an empty store, surfaces as
+// invalid_grant — not unsupported_grant_type, which would mean the branch
+// was never enabled).
+func (s *FxSuite) TestTokenDeviceCodeBranchIsWired() {
+	var got registrarParams
+	app := fxtest.New(s.T(),
+		s.supplyConfig("ui:https://app.example.com/auth,tempogate-device:cli"),
+		oidc.Fx(),
+		fx.Populate(&got),
+	)
+	app.RequireStart()
+	defer app.RequireStop()
+
+	mux := http.NewServeMux()
+	api := humago.New(mux, huma.DefaultConfig("fx_test", "0.0.0"))
+	for _, fn := range got.Registrars {
+		fn(api)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	body := strings.NewReader("grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=never-issued&client_id=tempogate-device")
+	resp, err := http.Post(srv.URL+"/token", "application/x-www-form-urlencoded", body)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	// An unknown device_code reaches the device branch and returns
+	// invalid_grant. unsupported_grant_type would mean the dispatch never
+	// reached the new case (DeviceCodeStore not injected); 404 would mean the
+	// /token registrar never ran at all.
+	s.NotEqual(http.StatusNotFound, resp.StatusCode)
+	s.Equal(http.StatusBadRequest, resp.StatusCode)
+
+	var oauthErr struct {
+		Error string `json:"error"`
+	}
+	s.Require().NoError(json.NewDecoder(resp.Body).Decode(&oauthErr))
+	s.Equal("invalid_grant", oauthErr.Error,
+		"device-code branch must be reachable; unsupported_grant_type means the DeviceCodeStore is not wired into tokenParams")
 }
 
 func (s *FxSuite) TestMalformedClientsFailsGraph() {
