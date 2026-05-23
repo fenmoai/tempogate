@@ -47,7 +47,8 @@ func (s *ConfigSuite) TestNew() {
 					},
 				},
 				OIDC: OIDCConfig{
-					Issuer: "http://127.0.0.1:8000",
+					Issuer:     "http://127.0.0.1:8000",
+					SessionTTL: 5 * time.Minute,
 					Google: GoogleConfig{
 						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
 						TokenEndpoint: "https://oauth2.googleapis.com/token",
@@ -84,7 +85,8 @@ func (s *ConfigSuite) TestNew() {
 					},
 				},
 				OIDC: OIDCConfig{
-					Issuer: "http://127.0.0.1:8000",
+					Issuer:     "http://127.0.0.1:8000",
+					SessionTTL: 5 * time.Minute,
 					Google: GoogleConfig{
 						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
 						TokenEndpoint: "https://oauth2.googleapis.com/token",
@@ -120,7 +122,8 @@ func (s *ConfigSuite) TestNew() {
 					},
 				},
 				OIDC: OIDCConfig{
-					Issuer: "http://127.0.0.1:8000",
+					Issuer:     "http://127.0.0.1:8000",
+					SessionTTL: 5 * time.Minute,
 					Google: GoogleConfig{
 						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
 						TokenEndpoint: "https://oauth2.googleapis.com/token",
@@ -158,7 +161,8 @@ func (s *ConfigSuite) TestNew() {
 					},
 				},
 				OIDC: OIDCConfig{
-					Issuer: "http://127.0.0.1:8000",
+					Issuer:     "http://127.0.0.1:8000",
+					SessionTTL: 5 * time.Minute,
 					Google: GoogleConfig{
 						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
 						TokenEndpoint: "https://oauth2.googleapis.com/token",
@@ -194,7 +198,8 @@ func (s *ConfigSuite) TestNew() {
 					},
 				},
 				OIDC: OIDCConfig{
-					Issuer: "https://tempogate.internal.example.com",
+					Issuer:     "https://tempogate.internal.example.com",
+					SessionTTL: 5 * time.Minute,
 					Google: GoogleConfig{
 						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
 						TokenEndpoint: "https://oauth2.googleapis.com/token",
@@ -232,8 +237,9 @@ func (s *ConfigSuite) TestNew() {
 					},
 				},
 				OIDC: OIDCConfig{
-					Issuer:  "http://127.0.0.1:8000",
-					Clients: "ui:https://temporal.example.com/auth/sso/callback,cli:http://127.0.0.1",
+					Issuer:     "http://127.0.0.1:8000",
+					Clients:    "ui:https://temporal.example.com/auth/sso/callback,cli:http://127.0.0.1",
+					SessionTTL: 5 * time.Minute,
 					Google: GoogleConfig{
 						ClientID:      "google-client-123.apps.googleusercontent.com",
 						AuthEndpoint:  "http://127.0.0.1:9999/mock/auth",
@@ -275,11 +281,51 @@ func (s *ConfigSuite) TestNew() {
 				OIDC: OIDCConfig{
 					Issuer:         "http://127.0.0.1:8000",
 					AllowedDomains: "example.com,corp.example.org",
+					SessionTTL:     5 * time.Minute,
 					Google: GoogleConfig{
 						ClientSecret:  "gocspx-secret",
 						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
 						TokenEndpoint: "http://127.0.0.1:9999/mock/token",
 						IssuerURL:     "http://127.0.0.1:9999",
+					},
+				},
+			},
+		},
+		{
+			name: "session ttl and signing key overridden by env",
+			env: map[string]string{
+				"OIDC__SESSION_TTL":         "10m",
+				"OIDC__SESSION_SIGNING_KEY": "ZXhhbXBsZS1zaWduaW5nLWtleS1mb3ItdGVzdGluZw",
+			},
+			want: &Config{
+				Log: LogConfig{Level: "info"},
+				HTTP: HTTPConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8000,
+					},
+				},
+				Admin: AdminConfig{
+					Listener: xloadtype.Listener{
+						IP:   net.IPv4(127, 0, 0, 1),
+						Port: 8081,
+					},
+				},
+				State: StateConfig{
+					Sqlite: SqliteConfig{
+						Path:        "/var/lib/tempogate/state.db",
+						MaxConns:    1,
+						BusyTimeout: 5 * time.Second,
+					},
+				},
+				OIDC: OIDCConfig{
+					Issuer:            "http://127.0.0.1:8000",
+					SessionTTL:        10 * time.Minute,
+					SessionSigningKey: "ZXhhbXBsZS1zaWduaW5nLWtleS1mb3ItdGVzdGluZw",
+					Google: GoogleConfig{
+						AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
+						TokenEndpoint: "https://oauth2.googleapis.com/token",
+						IssuerURL:     "https://accounts.google.com",
 					},
 				},
 			},

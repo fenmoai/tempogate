@@ -17,12 +17,6 @@ import (
 // not expected; callers may still distinguish it.
 var ErrDuplicateBrowserSession = errors.New("sqlite: browser session with this sid already exists")
 
-// ErrBrowserSessionNotFound is returned by LookupBrowserSession when no row
-// matches — because the sid was never minted, was already deleted, or the
-// row was reaped by a sweeper. The verification handler maps this to
-// "session_required", which restarts the verification flow.
-var ErrBrowserSessionNotFound = errors.New("sqlite: browser session not found")
-
 func (s *Store) SaveBrowserSession(ctx context.Context, bs oidc.BrowserSession) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO browser_sessions (sid, email, created_at, expires_at)
@@ -48,7 +42,7 @@ func (s *Store) LookupBrowserSession(ctx context.Context, sid string) (oidc.Brow
 		sid,
 	).Scan(&bs.SID, &bs.Email, &bs.CreatedAt, &bs.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return oidc.BrowserSession{}, fmt.Errorf("%w: %s", ErrBrowserSessionNotFound, sid)
+		return oidc.BrowserSession{}, fmt.Errorf("%w: %s", oidc.ErrBrowserSessionNotFound, sid)
 	}
 	if err != nil {
 		return oidc.BrowserSession{}, fmt.Errorf("sqlite: lookup browser session: %w", err)
