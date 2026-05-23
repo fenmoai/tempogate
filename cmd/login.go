@@ -53,6 +53,7 @@ func newLoginCmd(logger *zap.Logger) *cobra.Command {
 	var issuer, clientID, tokenFile string
 	var port int
 	var device bool
+	var devicePollDeadline time.Duration
 
 	c := &cobra.Command{
 		Use:   "login",
@@ -102,11 +103,15 @@ func newLoginCmd(logger *zap.Logger) *cobra.Command {
 			var tok cli.Token
 			if useDevice {
 				log.Info("starting device-flow login", zap.String("issuer", issuer))
-				tok, err = deviceRunner(cmd.Context(),
+				opts := []cli.DeviceOption{
 					cli.WithDeviceIssuer(issuer),
 					cli.WithDeviceClientID(clientID),
 					cli.WithDeviceOutput(cmd.ErrOrStderr()),
-				)
+				}
+				if devicePollDeadline > 0 {
+					opts = append(opts, cli.WithDevicePollDeadline(devicePollDeadline))
+				}
+				tok, err = deviceRunner(cmd.Context(), opts...)
 			} else {
 				log.Info("starting loopback login", zap.String("issuer", issuer))
 				tok, err = loginRunner(cmd.Context(),
@@ -140,5 +145,10 @@ func newLoginCmd(logger *zap.Logger) *cobra.Command {
 		"use the OAuth2 device authorization grant (RFC 8628) instead of the "+
 			"loopback browser flow. Required when this host has no browser "+
 			"(remote shell, cloud-code VM). Env: "+loginModeEnvVar+"=device.")
+	c.Flags().DurationVar(&devicePollDeadline, "device-poll-deadline", 0,
+		"cap how long --device polls before giving up. Defaults to the "+
+			"issuer's advertised expires_in (typically 15m). Pass a shorter "+
+			"value in CI to fail fast when the user does not approve; ignored "+
+			"without --device.")
 	return c
 }

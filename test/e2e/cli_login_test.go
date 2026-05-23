@@ -55,6 +55,14 @@ const (
 	cliClientID    = "tempogate-cli"
 	cliTokenFile   = "/tmp/tg-token.json"
 	cliAuthURLFile = "/tmp/tempogate-authurl"
+
+	// e2eSessionSigningKeyB64 is "0123456789abcdef0123456789abcdef" — 32 ASCII
+	// bytes, base64url-encoded without padding — the length the oidc fx graph
+	// requires for OIDC__SESSION_SIGNING_KEY. Stable across runs so the
+	// deployment is reproducible; the key is shared by every e2e setupCLIStack
+	// caller (loopback + device-flow). It only protects the intra-cluster
+	// verification-UI bounce, so a public test literal is fine.
+	e2eSessionSigningKeyB64 = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
 )
 
 // jwtPattern matches a compact JWS (three base64url segments) so the token a
@@ -259,7 +267,12 @@ func (s *cliStack) runToken(ctx context.Context, t *testing.T) string {
 
 // ---------- stack bring-up ----------
 
-func setupCLIStack(ctx context.Context, t *testing.T) *cliStack {
+// setupCLIStack brings up tempogate + mockgoogle + temporal + cliclient (the
+// shared headless-Chrome + tempogate-binary container). extraTempogateEnv is
+// merged onto the base OIDC__* config so the device-flow acceptance proof can
+// register its extra client_ids + signing key without forcing the loopback
+// proof to carry inert config.
+func setupCLIStack(ctx context.Context, t *testing.T, extraTempogateEnv ...map[string]string) *cliStack {
 	t.Helper()
 	root := repoRoot(t)
 
@@ -291,16 +304,41 @@ func setupCLIStack(ctx context.Context, t *testing.T) *cliStack {
 	// client (no secret ⇒ PKCE mandatory) with a 127.0.0.1: redirect prefix,
 	// so any ephemeral loopback port is accepted.
 	tgEnv := map[string]string{
-		"HTTP__LISTENER":               "0.0.0.0:8000",
-		"STATE__SQLITE__PATH":          "/state/state.db",
-		"OIDC__ISSUER":                 tempogateIssuer,
-		"OIDC__CLIENTS":                cliClientID + ":http://127.0.0.1:",
+		"HTTP__LISTENER":      "0.0.0.0:8000",
+		"STATE__SQLITE__PATH": "/state/state.db",
+		"OIDC__ISSUER":        tempogateIssuer,
+		// Three client_ids: the loopback CLI (used by TestCLILogin), the
+		// public device-flow CLI (TestCLIDeviceLogin), and the internal
+		// verification-UI client tempogate registers as a client of itself.
+		// The internal one is required by the server's fx graph
+		// unconditionally — the DeviceUI registrar refuses to build if it
+		// isn't present — so it has to be in the base config even for the
+		// loopback proof, which never touches it.
+		"OIDC__CLIENTS": cliClientID + ":http://127.0.0.1:," +
+			deviceClientID + ":cli," +
+			deviceUIClientID + ":" + tempogateIssuer + "/device/sso-callback",
+		"OIDC__CLIENT_SECRETS":         deviceUIClientID + ":" + deviceUIClientSecret,
 		"OIDC__ALLOWED_DOMAINS":        "example.com",
 		"OIDC__GOOGLE__CLIENT_ID":      "tempogate-upstream",
 		"OIDC__GOOGLE__CLIENT_SECRET":  "tempogate-upstream-secret",
 		"OIDC__GOOGLE__AUTH_ENDPOINT":  mockIssuer + "/auth",
 		"OIDC__GOOGLE__TOKEN_ENDPOINT": mockIssuer + "/token",
 		"OIDC__GOOGLE__ISSUER_URL":     mockIssuer,
+		// The signed-cookie session manager that backs the device-flow
+		// verification UI is built unconditionally by the full server
+		// graph. Without a signing key the migrate + serve containers fail
+		// at fx graph construction. A stable test literal — base64url-
+		// encoded 32 ASCII bytes — keeps the deployment reproducible
+		// across runs; the loopback flow doesn't touch the session
+		// cookie, so the key is inert here, but its presence is what
+		// unblocks both proofs.
+		"OIDC__SESSION_SIGNING_KEY": e2eSessionSigningKeyB64,
+		"OIDC__SESSION_TTL":         "5m",
+	}
+	for _, m := range extraTempogateEnv {
+		for k, v := range m {
+			tgEnv[k] = v
+		}
 	}
 	stateVol := fmt.Sprintf("tempogate-cli-e2e-state-%d", time.Now().UnixNano())
 	tgImg, tgFrom := builtImageSource("E2E_TEMPOGATE_IMAGE", "Dockerfile", root)
