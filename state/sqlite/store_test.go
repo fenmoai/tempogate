@@ -551,16 +551,24 @@ func (s *StoreSuite) TestFxComposition() {
 	s.T().Setenv("STATE__SQLITE__BUSY_TIMEOUT", "1s")
 	s.T().Setenv("STATE__SQLITE__MAX_CONNS", "1")
 
-	var injected *Store
+	var (
+		injected    *Store
+		asDeviceStr oidc.DeviceCodeStore
+	)
 	a := fxtest.New(s.T(),
 		config.Fx(),
 		tlog.Fx(),
 		Fx(),
-		fx.Populate(&injected),
+		fx.Populate(&injected, &asDeviceStr),
 	)
 	a.RequireStart()
 	defer a.RequireStop()
 
 	s.Require().NotNil(injected)
 	s.Require().NoError(injected.Migrate(s.ctx))
+	// fx.As(new(oidc.DeviceCodeStore)) binding regression guard: the
+	// composition root depends on this interface being satisfied by
+	// *Store; a refactor that drops the binding would silently break
+	// /device_authorization graph construction in production.
+	s.Require().NotNil(asDeviceStr)
 }

@@ -17,20 +17,24 @@ import (
 // same device_code or user_code already exists. With 256 bits of entropy on
 // device_code and a per-flow regenerate-on-collision loop in the issuer for
 // user_code, a real collision is not expected; callers may still distinguish
-// it.
-var ErrDuplicateDeviceCode = errors.New("sqlite: device code with this value already exists")
+// it. The error chain is rooted at oidc.ErrDuplicateDeviceCode so consumers
+// (the /device_authorization handler in particular) can match via errors.Is
+// against the consumer-side sentinel without importing state/sqlite.
+var ErrDuplicateDeviceCode = fmt.Errorf("%w: sqlite duplicate", oidc.ErrDuplicateDeviceCode)
 
 // ErrDeviceCodeNotFound is returned by a lookup or consume that finds no row
 // — because the row was never written, was already consumed, or was reaped
-// by a sweeper. The /token handler maps this to OAuth2 invalid_grant.
-var ErrDeviceCodeNotFound = errors.New("sqlite: device code not found")
+// by a sweeper. The /token handler maps this to OAuth2 invalid_grant. The
+// chain is rooted at oidc.ErrDeviceCodeNotFound for the same consumer-side
+// errors.Is reasons as ErrDuplicateDeviceCode.
+var ErrDeviceCodeNotFound = fmt.Errorf("%w: sqlite", oidc.ErrDeviceCodeNotFound)
 
 // ErrDeviceCodeNotPending is returned by Approve / Deny when the targeted
 // row exists but is no longer in the pending state — its approved_at or
 // denied_at is already stamped. The verification handler maps this to
 // "already_decided" so the user cannot flip a Deny to an Approve by
-// re-submitting the form.
-var ErrDeviceCodeNotPending = errors.New("sqlite: device code not in pending state")
+// re-submitting the form. Chain rooted at oidc.ErrDeviceCodeNotPending.
+var ErrDeviceCodeNotPending = fmt.Errorf("%w: sqlite", oidc.ErrDeviceCodeNotPending)
 
 func (s *Store) SaveDeviceCode(ctx context.Context, dc oidc.DeviceCode) error {
 	_, err := s.db.ExecContext(ctx,

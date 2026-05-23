@@ -52,6 +52,7 @@ type openIDConfig struct {
 	AuthorizationEndpoint            string   `json:"authorization_endpoint"`
 	TokenEndpoint                    string   `json:"token_endpoint"`
 	UserinfoEndpoint                 string   `json:"userinfo_endpoint"`
+	DeviceAuthorizationEndpoint      string   `json:"device_authorization_endpoint"`
 	JwksURI                          string   `json:"jwks_uri"`
 	ResponseTypesSupported           []string `json:"response_types_supported"`
 	GrantTypesSupported              []string `json:"grant_types_supported"`
@@ -127,6 +128,7 @@ func registerWellKnown(a huma.API, k JWKSSource, issuer string) {
 				AuthorizationEndpoint:            issuer + oidc.AuthorizePath,
 				TokenEndpoint:                    issuer + oidc.TokenPath,
 				UserinfoEndpoint:                 issuer + oidc.UserInfoPath,
+				DeviceAuthorizationEndpoint:      issuer + oidc.DeviceAuthorizationPath,
 				JwksURI:                          issuer + jwksPath,
 				ResponseTypesSupported:           []string{"code"},
 				GrantTypesSupported:              []string{"authorization_code", "refresh_token"},

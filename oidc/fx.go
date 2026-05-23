@@ -97,10 +97,28 @@ func newUserInfoRegistrar(p userInfoParams) func(huma.API) {
 	return u.Register
 }
 
-// Fx contributes the /authorize, /callback/google, /token and /userinfo
-// registrars into the shared "api_registrars" group the api package collects.
-// The store, upstream, signer and verifier dependencies are satisfied by
-// state/sqlite, oidc/google and keys via fx.As / fx.Provide.
+type deviceAuthorizationParams struct {
+	fx.In
+
+	Store   DeviceCodeStore
+	Clients ClientRegistry
+
+	Issuer string `name:"oidc_issuer"`
+}
+
+// newDeviceAuthorizationRegistrar builds the /device_authorization endpoint.
+// DeviceCodeStore is satisfied by state/sqlite via fx.As; ClientRegistry is
+// the same instance /authorize and /token use, so the "registered public
+// client" gate stays in lockstep with the PKCE posture decided there.
+func newDeviceAuthorizationRegistrar(p deviceAuthorizationParams) func(huma.API) {
+	h := NewDeviceAuthorization(p.Store, p.Clients, p.Issuer)
+	return h.Register
+}
+
+// Fx contributes the /authorize, /callback/google, /token, /userinfo and
+// /device_authorization registrars into the shared "api_registrars" group the
+// api package collects. The store, upstream, signer and verifier dependencies
+// are satisfied by state/sqlite, oidc/google and keys via fx.As / fx.Provide.
 func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(newClientRegistry),
@@ -125,6 +143,12 @@ func Fx() fx.Option {
 		fx.Provide(
 			fx.Annotate(
 				newUserInfoRegistrar,
+				fx.ResultTags(`group:"api_registrars"`),
+			),
+		),
+		fx.Provide(
+			fx.Annotate(
+				newDeviceAuthorizationRegistrar,
 				fx.ResultTags(`group:"api_registrars"`),
 			),
 		),
