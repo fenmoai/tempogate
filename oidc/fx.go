@@ -164,10 +164,46 @@ func newDeviceAuthorizationRegistrar(p deviceAuthorizationParams) func(huma.API)
 	return h.Register
 }
 
-// Fx contributes the /authorize, /callback/google, /token, /userinfo and
-// /device_authorization registrars into the shared "api_registrars" group the
-// api package collects. The store, upstream, signer and verifier dependencies
-// are satisfied by state/sqlite, oidc/google and keys via fx.As / fx.Provide.
+type deviceUIParams struct {
+	fx.In
+
+	Devices  DeviceCodeStore
+	Sessions *SessionManager
+	Clients  ClientRegistry
+
+	Issuer        string `name:"oidc_issuer"`
+	SigningKeyB64 string `name:"oidc_session_signing_key"`
+}
+
+// newDeviceUIRegistrar builds the verification-UI surface. The internal
+// tempogate-device-ui client must be present in the shared ClientRegistry
+// and registered confidential — NewDeviceUI surfaces both misconfigurations
+// as graph-construction errors, so an operator who forgets the
+// OIDC__CLIENT_SECRETS entry learns about it at startup rather than when
+// the first user submits the verification form. The signing key is the
+// same one OIDC__SESSION_SIGNING_KEY backs SessionManager with, decoded
+// once here so the bounce state and the session cookie share a single
+// cryptographic root.
+func newDeviceUIRegistrar(p deviceUIParams) (func(huma.API), error) {
+	key, err := base64.RawURLEncoding.DecodeString(p.SigningKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("oidc: OIDC__SESSION_SIGNING_KEY must be base64url-encoded: %w", err)
+	}
+	if len(key) != sessionSigningKeyBytes {
+		return nil, fmt.Errorf("oidc: OIDC__SESSION_SIGNING_KEY must decode to %d bytes, got %d", sessionSigningKeyBytes, len(key))
+	}
+	ui, err := NewDeviceUI(p.Devices, p.Sessions, p.Clients, key, p.Issuer)
+	if err != nil {
+		return nil, err
+	}
+	return ui.Register, nil
+}
+
+// Fx contributes the /authorize, /callback/google, /token, /userinfo,
+// /device_authorization and /device* registrars into the shared
+// "api_registrars" group the api package collects. The store, upstream,
+// signer and verifier dependencies are satisfied by state/sqlite,
+// oidc/google and keys via fx.As / fx.Provide.
 func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(newClientRegistry),
@@ -199,6 +235,12 @@ func Fx() fx.Option {
 		fx.Provide(
 			fx.Annotate(
 				newDeviceAuthorizationRegistrar,
+				fx.ResultTags(`group:"api_registrars"`),
+			),
+		),
+		fx.Provide(
+			fx.Annotate(
+				newDeviceUIRegistrar,
 				fx.ResultTags(`group:"api_registrars"`),
 			),
 		),

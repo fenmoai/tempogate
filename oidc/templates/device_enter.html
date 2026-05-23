@@ -1,0 +1,12 @@
+{{define "title"}}Enter device code{{end}}
+{{define "content" -}}
+<h1>Sign in to your device</h1>
+<p>Type the code shown on your terminal or device, then continue.</p>
+<form method="post" action="{{.PostURL}}" autocomplete="off">
+  <label for="user_code" class="muted">Device code</label>
+  <input id="user_code" name="user_code" type="text" value="{{.PrefilledUserCode}}" pattern="[A-Za-z0-9\-]{8,9}" placeholder="XXXX-XXXX" autocapitalize="characters" autocorrect="off" spellcheck="false" required>
+  <div class="actions">
+    <button type="submit" class="primary">Continue</button>
+  </div>
+</form>
+{{- end}}
