@@ -364,7 +364,7 @@ func (f *DeviceFlow) pollLoop(ctx context.Context, init deviceAuthResponse) (Tok
 		if err := ctx.Err(); err != nil {
 			return Token{}, err
 		}
-		if f.now().Sub(start) > deadline {
+		if f.now().Sub(start) >= deadline {
 			return Token{}, ErrPollDeadlineExceeded
 		}
 

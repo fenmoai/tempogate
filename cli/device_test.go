@@ -280,11 +280,21 @@ func (s *DeviceFlowSuite) TestSentinelErrorMapping() {
 	}
 	for _, tc := range cases {
 		s.Run(tc.name, func() {
-			s.SetupTest()
-			defer s.TearDownTest()
-			s.issuer.script(tc.resp)
+			// One fresh mock issuer per row keeps the response scripts and
+			// call counters from leaking between table entries; the suite's
+			// own SetupTest/TearDownTest remain responsible for the
+			// outer-test fixture and are not re-entered here.
+			issuer := newMockDeviceIssuer()
+			defer issuer.close()
+			issuer.script(tc.resp)
 
-			_, err := s.newFlow().Run(context.Background())
+			flow := cli.NewDeviceFlow(
+				cli.WithDeviceIssuer(issuer.srv.URL),
+				cli.WithDeviceHTTPClient(issuer.srv.Client()),
+				cli.WithDeviceClock(s.clock.now),
+				cli.WithDeviceSleep(s.clock.sleep),
+			)
+			_, err := flow.Run(context.Background())
 			s.Require().Error(err)
 			s.True(errors.Is(err, tc.want), "got %v, want errors.Is(%v)", err, tc.want)
 		})
