@@ -71,10 +71,11 @@ const (
 var jwtPattern = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
 
 type cliStack struct {
-	mockBaseURL  string
-	frontendAddr string
-	client       testcontainers.Container
-	chromeWS     string
+	mockBaseURL      string // mapped http://host:port for mockgoogle
+	tempogateBaseURL string // mapped http://host:port for tempogate
+	frontendAddr     string
+	client           testcontainers.Container
+	chromeWS         string
 }
 
 func TestCLILogin(t *testing.T) {
@@ -422,14 +423,19 @@ func setupCLIStack(ctx context.Context, t *testing.T, extraTempogateEnv ...map[s
 	// --- cliclient: headless Chrome + the tempogate binary in one container,
 	// so the loopback server and the browser share a network namespace.
 	cliImg, cliFrom := builtImageSource("E2E_CLICLIENT_IMAGE", "test/e2e/cliclient/Dockerfile", root)
+	// The headless-shell base image's run.sh already pins
+	// --remote-debugging-address=0.0.0.0 --remote-debugging-port=9223 and
+	// runs socat to forward host-mapped 9222 → internal 9223; redefining
+	// those here as the container Cmd appends a *second*
+	// --remote-debugging-port=9222 in chrome 148+'s run.sh ($@), which
+	// either makes chrome bind both ports or crash on startup. Leaving Cmd
+	// empty defers to run.sh's defaults; --disable-dev-shm-usage isn't
+	// needed because shared docker-shm crashes only matter to chrome's
+	// renderer process under heavy DOM trees, which this test never has.
 	clientC, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:          cliImg,
 			FromDockerfile: cliFrom,
-			Cmd: []string{
-				"--remote-debugging-address=0.0.0.0", "--remote-debugging-port=9222",
-				"--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-			},
 			ExposedPorts:   []string{"9222/tcp"},
 			Networks:       []string{netName},
 			NetworkAliases: alias("cliclient"),
@@ -442,9 +448,10 @@ func setupCLIStack(ctx context.Context, t *testing.T, extraTempogateEnv ...map[s
 	track(ctx, t, "cliclient", clientC)
 
 	return &cliStack{
-		mockBaseURL:  mockBase,
-		frontendAddr: mappedAddr(ctx, t, temporal, "7233"),
-		client:       clientC,
-		chromeWS:     devtoolsWS(ctx, t, clientC),
+		mockBaseURL:      mockBase,
+		tempogateBaseURL: mappedHTTP(ctx, t, tempogate, "8000"),
+		frontendAddr:     mappedAddr(ctx, t, temporal, "7233"),
+		client:           clientC,
+		chromeWS:         devtoolsWS(ctx, t, clientC),
 	}
 }
