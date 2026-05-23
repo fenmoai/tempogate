@@ -61,7 +61,7 @@ func (s *StoreSuite) TestIsCurrent() {
 
 	err = s.store.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 7")
+	s.Contains(err.Error(), "schema version 0, expected 9")
 	s.Contains(err.Error(), "tempogate migrate")
 }
 
@@ -72,7 +72,7 @@ func (s *StoreSuite) TestIsCurrentOnFreshDB() {
 
 	err = fresh.IsCurrent(s.ctx)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "schema version 0, expected 7")
+	s.Contains(err.Error(), "schema version 0, expected 9")
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
@@ -82,9 +82,9 @@ func (s *StoreSuite) TestMigrateIsIdempotent() {
 	var versions int
 	row := s.store.db.QueryRowContext(s.ctx, `SELECT count(*) FROM schema_migrations`)
 	s.Require().NoError(row.Scan(&versions))
-	s.Equal(7, versions)
+	s.Equal(9, versions)
 
-	for _, want := range []string{"keypairs", "auth_requests", "auth_codes", "refresh_tokens", "integration_keys", "jti_denylist"} {
+	for _, want := range []string{"keypairs", "auth_requests", "auth_codes", "refresh_tokens", "integration_keys", "jti_denylist", "device_codes", "browser_sessions"} {
 		var table string
 		row = s.store.db.QueryRowContext(s.ctx,
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, want)
@@ -454,6 +454,40 @@ func (s *StoreSuite) TestErrorsAfterClose() {
 		{"ConsumeRefresh", func() error {
 			_, err := s.store.ConsumeRefresh(s.ctx, "closed")
 			return err
+		}},
+		{"SaveDeviceCode", func() error {
+			return s.store.SaveDeviceCode(s.ctx, s.deviceCode("closed-dc", "CLOSEDDC"))
+		}},
+		{"LookupDeviceCodeByDeviceCode", func() error {
+			_, err := s.store.LookupDeviceCodeByDeviceCode(s.ctx, "closed")
+			return err
+		}},
+		{"LookupDeviceCodeByUserCode", func() error {
+			_, err := s.store.LookupDeviceCodeByUserCode(s.ctx, "CLOSEDUC")
+			return err
+		}},
+		{"TouchDeviceCodePoll", func() error {
+			return s.store.TouchDeviceCodePoll(s.ctx, "closed", time.Now().UTC(), false)
+		}},
+		{"ApproveDeviceCode", func() error {
+			return s.store.ApproveDeviceCode(s.ctx, "CLOSEDUC", "alice@example.com", time.Now().UTC())
+		}},
+		{"DenyDeviceCode", func() error {
+			return s.store.DenyDeviceCode(s.ctx, "CLOSEDUC", time.Now().UTC())
+		}},
+		{"ConsumeDeviceCode", func() error {
+			_, err := s.store.ConsumeDeviceCode(s.ctx, "closed")
+			return err
+		}},
+		{"SaveBrowserSession", func() error {
+			return s.store.SaveBrowserSession(s.ctx, s.browserSession("closed-sid"))
+		}},
+		{"LookupBrowserSession", func() error {
+			_, err := s.store.LookupBrowserSession(s.ctx, "closed-sid")
+			return err
+		}},
+		{"DeleteBrowserSession", func() error {
+			return s.store.DeleteBrowserSession(s.ctx, "closed-sid")
 		}},
 		{"Migrate", func() error { return s.store.Migrate(s.ctx) }},
 	}
