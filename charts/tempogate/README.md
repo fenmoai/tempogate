@@ -117,6 +117,8 @@ auth:
 | `state.sqlitePath` | `/var/lib/tempogate/state.db` | `STATE__SQLITE__PATH` (must be under `mountPath`). |
 | `log.level` | `info` | `LOG__LEVEL` (`debug`/`info`/`warn`/`error`). |
 | `oidc.issuer` | `""` | `OIDC__ISSUER` — externally reachable base URL. |
+| `oidc.sessionSigningKeySecretRef` | `{name,key}` empty | Secret holding `OIDC__SESSION_SIGNING_KEY` (base64url 32-byte HMAC key for the device-flow verification-page cookie). tempogate refuses to boot when unset. |
+| `oidc.sessionTtl` | `""` | `OIDC__SESSION_TTL` — verification-page cookie TTL (Go duration). `""` leaves the binary default (5m). |
 | `auth.clients` | `""` | `OIDC__CLIENTS` — `id:redirect_uri_prefix` allowlist. |
 | `auth.allowedDomains` | `[]` | `OIDC__ALLOWED_DOMAINS` — SSO email-domain gate. |
 | `auth.clientSecretsSecretRef` | `{name,key}` empty | Secret holding `OIDC__CLIENT_SECRETS`. |

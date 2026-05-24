@@ -11,6 +11,9 @@ data:
   {{- with .Values.oidc.issuer }}
   OIDC__ISSUER: {{ . | quote }}
   {{- end }}
+  {{- with .Values.oidc.sessionTtl }}
+  OIDC__SESSION_TTL: {{ . | quote }}
+  {{- end }}
   {{- with .Values.auth.clients }}
   OIDC__CLIENTS: {{ . | quote }}
   {{- end }}
