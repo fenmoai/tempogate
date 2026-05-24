@@ -46,6 +46,10 @@ func TestSubPathIssuerHosting(t *testing.T) {
 		"OIDC__GOOGLE__TOKEN_ENDPOINT": mockIssuer + "/token",
 		"OIDC__GOOGLE__ISSUER_URL":     mockIssuer,
 	}
+	// Path-prefixed issuer ⇒ the device-ui's registered callback also
+	// lives under the prefix; pass the prefixed issuer so the registration
+	// matches what the verification-UI handler builds.
+	addDeviceUIServerEnv(env, issuer)
 	stateVol := fmt.Sprintf("tempogate-prefix-e2e-state-%d", time.Now().UnixNano())
 	tgImg, tgFrom := builtImageSource("E2E_TEMPOGATE_IMAGE", "Dockerfile", root)
 

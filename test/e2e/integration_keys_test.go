@@ -322,6 +322,7 @@ func setupIntegrationKeysStack(ctx context.Context, t *testing.T) *integrationKe
 		"OIDC__GOOGLE__TOKEN_ENDPOINT": "http://unused.invalid/token",
 		"OIDC__GOOGLE__ISSUER_URL":     "http://unused.invalid",
 	}
+	addDeviceUIServerEnv(tgEnv, tempogateIssuer)
 	stateVol := fmt.Sprintf("tempogate-intkeys-e2e-state-%d", time.Now().UnixNano())
 	tgImg, tgFrom := builtImageSource("E2E_TEMPOGATE_IMAGE", "Dockerfile", root)
 

@@ -65,6 +65,34 @@ const (
 	e2eSessionSigningKeyB64 = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
 )
 
+// addDeviceUIServerEnv layers onto an existing tempogate e2e env map the
+// OIDC__* keys the server's fx graph has required since the device-flow
+// verification UI's signed-cookie session work landed: the signing key,
+// the internal `tempogate-device-ui` client (registered with a confidential
+// secret), and its callback under callbackIssuer. Existing OIDC__CLIENTS /
+// OIDC__CLIENT_SECRETS entries are preserved — the device-ui registration
+// is appended — so harnesses that already register their own clients
+// (loopback CLI, temporal-ui SSO, noop admin tests) keep working unchanged.
+// callbackIssuer is the issuer URL the device-ui callback hangs off of
+// (typically `tempogateIssuer`; for the path-prefixed test, the prefixed
+// form so the registered redirect matches what the handler builds).
+func addDeviceUIServerEnv(env map[string]string, callbackIssuer string) {
+	deviceUIRegistration := deviceUIClientID + ":" + callbackIssuer + "/device/sso-callback"
+	if existing := env["OIDC__CLIENTS"]; existing != "" {
+		env["OIDC__CLIENTS"] = existing + "," + deviceUIRegistration
+	} else {
+		env["OIDC__CLIENTS"] = deviceUIRegistration
+	}
+	deviceUISecretEntry := deviceUIClientID + ":" + deviceUIClientSecret
+	if existing := env["OIDC__CLIENT_SECRETS"]; existing != "" {
+		env["OIDC__CLIENT_SECRETS"] = existing + "," + deviceUISecretEntry
+	} else {
+		env["OIDC__CLIENT_SECRETS"] = deviceUISecretEntry
+	}
+	env["OIDC__SESSION_SIGNING_KEY"] = e2eSessionSigningKeyB64
+	env["OIDC__SESSION_TTL"] = "5m"
+}
+
 // jwtPattern matches a compact JWS (three base64url segments) so the token a
 // subcommand prints can be lifted out of multiplexed exec output regardless of
 // any incidental stderr.
@@ -303,39 +331,23 @@ func setupCLIStack(ctx context.Context, t *testing.T, extraTempogateEnv ...map[s
 
 	// --- tempogate: migrate then serve. The CLI is registered as a *public*
 	// client (no secret ⇒ PKCE mandatory) with a 127.0.0.1: redirect prefix,
-	// so any ephemeral loopback port is accepted.
+	// so any ephemeral loopback port is accepted. The device-flow CLI
+	// (tempogate-device) goes in too so TestCLIDeviceLogin can reuse this
+	// stack; addDeviceUIServerEnv adds the verification-UI's internal
+	// client + session signing key the server fx graph requires.
 	tgEnv := map[string]string{
-		"HTTP__LISTENER":      "0.0.0.0:8000",
-		"STATE__SQLITE__PATH": "/state/state.db",
-		"OIDC__ISSUER":        tempogateIssuer,
-		// Three client_ids: the loopback CLI (used by TestCLILogin), the
-		// public device-flow CLI (TestCLIDeviceLogin), and the internal
-		// verification-UI client tempogate registers as a client of itself.
-		// The internal one is required by the server's fx graph
-		// unconditionally — the DeviceUI registrar refuses to build if it
-		// isn't present — so it has to be in the base config even for the
-		// loopback proof, which never touches it.
-		"OIDC__CLIENTS": cliClientID + ":http://127.0.0.1:," +
-			deviceClientID + ":cli," +
-			deviceUIClientID + ":" + tempogateIssuer + "/device/sso-callback",
-		"OIDC__CLIENT_SECRETS":         deviceUIClientID + ":" + deviceUIClientSecret,
+		"HTTP__LISTENER":               "0.0.0.0:8000",
+		"STATE__SQLITE__PATH":          "/state/state.db",
+		"OIDC__ISSUER":                 tempogateIssuer,
+		"OIDC__CLIENTS":                cliClientID + ":http://127.0.0.1:," + deviceClientID + ":cli",
 		"OIDC__ALLOWED_DOMAINS":        "example.com",
 		"OIDC__GOOGLE__CLIENT_ID":      "tempogate-upstream",
 		"OIDC__GOOGLE__CLIENT_SECRET":  "tempogate-upstream-secret",
 		"OIDC__GOOGLE__AUTH_ENDPOINT":  mockIssuer + "/auth",
 		"OIDC__GOOGLE__TOKEN_ENDPOINT": mockIssuer + "/token",
 		"OIDC__GOOGLE__ISSUER_URL":     mockIssuer,
-		// The signed-cookie session manager that backs the device-flow
-		// verification UI is built unconditionally by the full server
-		// graph. Without a signing key the migrate + serve containers fail
-		// at fx graph construction. A stable test literal — base64url-
-		// encoded 32 ASCII bytes — keeps the deployment reproducible
-		// across runs; the loopback flow doesn't touch the session
-		// cookie, so the key is inert here, but its presence is what
-		// unblocks both proofs.
-		"OIDC__SESSION_SIGNING_KEY": e2eSessionSigningKeyB64,
-		"OIDC__SESSION_TTL":         "5m",
 	}
+	addDeviceUIServerEnv(tgEnv, tempogateIssuer)
 	for _, m := range extraTempogateEnv {
 		for k, v := range m {
 			tgEnv[k] = v
