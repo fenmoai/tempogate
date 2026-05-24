@@ -1208,6 +1208,185 @@ func TestNewDeviceUIRejectsPublicInternalClient(t *testing.T) {
 	}
 }
 
+// TestEnterPageCSPIncludesUpstreamFormActionSource pins the regression:
+// CSP3 §6.7.2.5 enforces form-action against every URL in the redirect
+// chain that follows a form submission, so an upstream IdP on a different
+// origin from the issuer (every production Google deployment) needs its
+// origin in the directive's source list or the browser silently refuses
+// the cross-origin hop. The handler must surface the upstream origin into
+// the rendered CSP alongside 'self'.
+func (s *DeviceUISuite) TestEnterPageCSPIncludesUpstreamFormActionSource() {
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
+		oidc.WithUpstreamIDPOrigin("https://accounts.google.com/o/oauth2/v2/auth"),
+	)
+	s.Require().NoError(err)
+	mux := http.NewServeMux()
+	ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-csp-enter", "0.0.0")))
+	local := httptest.NewServer(mux)
+	defer local.Close()
+
+	resp, err := s.client.Get(local.URL + "/device")
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	body := readBody(s.T(), resp)
+	s.Contains(body, "form-action 'self' https://accounts.google.com;",
+		"device_enter CSP must whitelist the upstream IdP origin alongside 'self'")
+}
+
+// TestEnterPageCSPDefaultsToSelfWithoutUpstream covers the back-compat
+// posture: the suite's existing DeviceUI does not set WithUpstreamIDPOrigin,
+// so its entry page must keep form-action at 'self' with no trailing junk.
+// Deployments whose upstream IdP shares the issuer's origin (typical for
+// in-process integration tests) rely on this.
+func (s *DeviceUISuite) TestEnterPageCSPDefaultsToSelfWithoutUpstream() {
+	resp, err := s.client.Do(s.req(http.MethodGet, "/device"))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	body := readBody(s.T(), resp)
+	s.Contains(body, "form-action 'self';",
+		"entry page form-action must default to 'self' when no upstream origin is wired")
+	s.NotContains(body, "form-action 'self' ",
+		"no trailing source should leak in when upstream is unset")
+}
+
+// TestConfirmPageCSPStaysAtSelf asserts the post-SSO pages keep the
+// tighter form-action 'self' directive even when the device-ui is wired
+// with an upstream origin: their Approve/Deny POSTs are same-origin, so
+// widening the directive there would be a needless loss of defense-in-
+// depth.
+func (s *DeviceUISuite) TestConfirmPageCSPStaysAtSelf() {
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
+		oidc.WithUpstreamIDPOrigin("https://accounts.google.com/o/oauth2/v2/auth"),
+	)
+	s.Require().NoError(err)
+	mux := http.NewServeMux()
+	ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-csp-confirm", "0.0.0")))
+	local := httptest.NewServer(mux)
+	defer local.Close()
+
+	cookieValue := s.seedSession()
+	req, err := http.NewRequest(http.MethodGet, local.URL+"/device/confirm?user_code="+deviceUITestUserDisplay, http.NoBody)
+	s.Require().NoError(err)
+	req.Header.Set("Cookie", cookieValue)
+	resp, err := s.client.Do(req)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+	body := readBody(s.T(), resp)
+	s.Contains(body, "form-action 'self';",
+		"confirm page form-action must stay at 'self' — its POSTs are same-origin")
+	s.NotContains(body, "accounts.google.com",
+		"upstream origin must not leak into post-SSO pages")
+}
+
+// TestNewDeviceUIRejectsInvalidUpstreamOrigin pins the parser's failure
+// modes: a non-empty raw value must be an absolute URL with scheme +
+// host, and the scheme must be http or https (the CSP source grammar
+// doesn't accept other schemes for form-action anyway).
+func TestNewDeviceUIRejectsInvalidUpstreamOrigin(t *testing.T) {
+	reg, err := oidc.ParseClientRegistry(deviceUIClientsRaw)
+	if err != nil {
+		t.Fatalf("parse clients: %v", err)
+	}
+	if err := reg.WithSecrets("tempogate-device-ui:" + deviceUIInternalSecret); err != nil {
+		t.Fatalf("with secrets: %v", err)
+	}
+	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
+	key := []byte("0123456789abcdef0123456789abcdef")
+
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"no scheme", "accounts.google.com/o/oauth2/v2/auth"},
+		{"no host", "https:///oauth2/v2/auth"},
+		{"file scheme", "file:///oauth2/auth"},
+		{"unparseable", "://broken"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, key, testIssuer,
+				oidc.WithUpstreamIDPOrigin(tc.raw))
+			if !errors.Is(err, oidc.ErrInvalidUpstreamIDPOrigin) {
+				t.Fatalf("expected ErrInvalidUpstreamIDPOrigin for %q, got %v", tc.raw, err)
+			}
+		})
+	}
+}
+
+// TestNewDeviceUIUpstreamOriginVariants pins the accepted shapes: an
+// authorization-endpoint URL with a path, query, port, or upper-case
+// scheme collapses to the canonical "scheme://host[:port]" CSP source.
+// Empty is permitted (back-compat for same-origin upstream test setups).
+func TestNewDeviceUIUpstreamOriginVariants(t *testing.T) {
+	reg, err := oidc.ParseClientRegistry(deviceUIClientsRaw)
+	if err != nil {
+		t.Fatalf("parse clients: %v", err)
+	}
+	if err := reg.WithSecrets("tempogate-device-ui:" + deviceUIInternalSecret); err != nil {
+		t.Fatalf("with secrets: %v", err)
+	}
+	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
+	key := []byte("0123456789abcdef0123456789abcdef")
+
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"https with path", "https://accounts.google.com/o/oauth2/v2/auth", "https://accounts.google.com"},
+		{"https with port + query", "https://idp.example.com:8443/auth?x=1", "https://idp.example.com:8443"},
+		{"http loopback", "http://127.0.0.1:5556/dex/auth", "http://127.0.0.1:5556"},
+		{"upper-case scheme", "HTTPS://idp.example.com/auth", "https://idp.example.com"},
+		{"empty (back-compat)", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ui, err := oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, key, testIssuer,
+				oidc.WithUpstreamIDPOrigin(tc.raw))
+			if err != nil {
+				t.Fatalf("construct: %v", err)
+			}
+			mux := http.NewServeMux()
+			ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-variants", "0.0.0")))
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			resp, err := http.Get(srv.URL + "/device") //nolint:noctx // test-only loopback
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			body := string(b)
+			wantSubstring := "form-action 'self';"
+			if tc.want != "" {
+				wantSubstring = "form-action 'self' " + tc.want + ";"
+			}
+			if !strings.Contains(body, wantSubstring) {
+				t.Fatalf("expected %q in rendered CSP, got: %s", wantSubstring, formActionSlice(body))
+			}
+		})
+	}
+}
+
+// formActionSlice extracts the form-action directive substring (up to the
+// next ';') so test failure messages stay readable instead of dumping the
+// entire <head> CSP meta tag.
+func formActionSlice(body string) string {
+	i := strings.Index(body, "form-action ")
+	if i < 0 {
+		return "(no form-action in body)"
+	}
+	tail := body[i:]
+	if j := strings.Index(tail, ";"); j >= 0 {
+		return tail[:j]
+	}
+	return tail
+}
+
 func TestNewDeviceUIAcceptsCustomInternalClientID(t *testing.T) {
 	reg, err := oidc.ParseClientRegistry("tempogate-device:cli,my-custom-ui:" + testIssuer + "/device/sso-callback")
 	if err != nil {
