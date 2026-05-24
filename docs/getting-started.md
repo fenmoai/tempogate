@@ -93,6 +93,18 @@ reuses that file, refreshing ~5 min before expiry, and prints only the token —
 safe in `$(...)`. Details:
 [`docs/cli-loopback-login.md`](cli-loopback-login.md).
 
+> **No local browser?** On a remote SSH session, a cloud dev VM, or any host
+> where the shell running `tempogate login` cannot open your browser, use the
+> device-code flow instead:
+>
+> ```bash
+> tempogate login --device
+> ```
+>
+> The CLI prints a short code and a URL you open on any device with a
+> browser — phone, laptop, tablet. Full UX in
+> [`docs/cli-device-login.md`](cli-device-login.md).
+
 ```bash
 tctl --address tempogate:7233 \
   --tls_server_name temporal \

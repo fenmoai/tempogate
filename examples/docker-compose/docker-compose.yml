@@ -69,11 +69,20 @@ services:
       # Externally reachable base URL — advertised as `issuer`, derives
       # jwks_uri. Same string on host and in-network (see header comment).
       OIDC__ISSUER: "http://tempogate:8000"
-      # Two registered clients: the Temporal Web UI (confidential — see
-      # CLIENT_SECRETS) and the CLI loopback (public, PKCE). The CLI entry
-      # lets `tempogate login` work against this stack too.
-      OIDC__CLIENTS: "temporal-ui:http://temporal-ui:8080/auth/sso/callback,tempogate-cli:http://127.0.0.1:"
-      OIDC__CLIENT_SECRETS: "temporal-ui:${TEMPORAL_UI_CLIENT_SECRET:-local-temporal-ui-confidential-secret}"
+      # Four registered clients:
+      #   - temporal-ui            (confidential, see CLIENT_SECRETS): Web UI SSO.
+      #   - tempogate-cli          (public, PKCE):                     loopback `tempogate login`.
+      #   - tempogate-device       (public, no redirect URI):          CLI side of
+      #                             `tempogate login --device` — see docs/cli-device-login.md.
+      #   - tempogate-device-ui    (confidential, see CLIENT_SECRETS): tempogate's own
+      #                             verification page bouncing through Google SSO.
+      OIDC__CLIENTS: "temporal-ui:http://temporal-ui:8080/auth/sso/callback,tempogate-cli:http://127.0.0.1:,tempogate-device:,tempogate-device-ui:http://tempogate:8000/device/sso-callback"
+      OIDC__CLIENT_SECRETS: "temporal-ui:${TEMPORAL_UI_CLIENT_SECRET:-local-temporal-ui-confidential-secret},tempogate-device-ui:${TEMPOGATE_DEVICE_UI_CLIENT_SECRET:-local-tempogate-device-ui-confidential-secret}"
+      # Device flow: HMAC key signing the short-lived verification-page session
+      # cookie. Base64url-encoded 32-byte randomness. Demo value below; in real
+      # deployments generate once with `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`
+      # and supply via a Secret. Must be stable across rolling restarts.
+      OIDC__SESSION_SIGNING_KEY: "${TEMPOGATE_SESSION_SIGNING_KEY:-rR2qre32BN8f7gFU8Al1szcjZz9R8Ks2g8jtoJNizls}"
       OIDC__ALLOWED_DOMAINS: "${TEMPOGATE_ALLOWED_DOMAINS:-example.com}"
       # Point tempogate's upstream Google client at the bundled mock.
       OIDC__GOOGLE__CLIENT_ID: "tempogate-upstream"
