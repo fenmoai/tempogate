@@ -1,6 +1,6 @@
 # `tempogate login` — the loopback CLI flow
 
-This document explains how an engineer obtains a personal Temporal JWT from a
+This document explains how a user obtains a personal Temporal JWT from a
 laptop, how the loopback redirect works, and **why ephemeral loopback ports
 work out of the box** without anyone touching a Google Cloud Console.
 
@@ -84,12 +84,12 @@ client registry matches `redirect_uri` by prefix, so:
   next character after `127.0.0.1` must be `:`, not `.`.
 
 If you prefer a fixed port, register `tempogate-cli:http://127.0.0.1:39473/`
-and have engineers run `tempogate login --port 39473`.
+and have users run `tempogate login --port 39473`.
 
 The signed-in email must also pass `OIDC__ALLOWED_DOMAINS`, the same gate the
 Web UI flow uses.
 
-## Engineer usage
+## Usage
 
 ```bash
 export TEMPOGATE__ISSUER=https://tempogate.example.com

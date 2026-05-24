@@ -1,6 +1,6 @@
 # `tempogate login --device` — the device-code CLI flow
 
-This document explains how an engineer obtains a personal Temporal JWT from a
+This document explains how a user obtains a personal Temporal JWT from a
 shell that has **no local browser** — a remote SSH session, a cloud-hosted dev
 VM, a CI debug shell, a tablet SSH-ed into a workstation — using the OAuth 2.0
 device authorization grant ([RFC 8628]).

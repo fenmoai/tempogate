@@ -210,7 +210,7 @@ the [chart releases](https://github.com/fenmoai/tempogate/releases?q=chart-v).
 
 ## Personal tokens from a laptop
 
-Once the server is reachable, an engineer mints a short-lived Temporal JWT
+Once the server is reachable, a user mints a short-lived Temporal JWT
 without hand-editing any config:
 
 ```bash
