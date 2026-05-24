@@ -84,17 +84,27 @@ type tokenParams struct {
 	Clients ClientRegistry
 }
 
-// newTokenRegistrar builds the /token endpoint. The Signer is provided by
-// keys.Fx over the shared keypair aggregate; TokenStore and DeviceCodeStore
-// are both satisfied by state/sqlite via fx.As; ClientRegistry is the same
-// instance /authorize uses, so a code minted without PKCE is redeemable only
-// by the confidential client that secret-authenticates here. Wiring the
-// DeviceCodeStore in unconditionally turns the RFC 8628 grant branch on for
-// every tempogate deployment — opting back out would mean removing the
-// /device_authorization registrar as well, so the consistent posture is to
-// expose the whole device flow or none of it.
-func newTokenRegistrar(p tokenParams) func(huma.API) {
-	t := NewToken(p.Store, p.Signer, p.Clients, WithDeviceCodeStore(p.Devices))
+// newToken builds the shared *Token. It is provided as its own dependency
+// (rather than constructed inline by newTokenRegistrar) so the device-flow
+// verification UI can consume the same instance and call its
+// RedeemAuthorizationCode method in-process — sidestepping the HTTPS
+// self-loopback the SSO callback would otherwise need to do back through
+// the issuer URL. The Signer is provided by keys.Fx over the shared
+// keypair aggregate; TokenStore and DeviceCodeStore are both satisfied by
+// state/sqlite via fx.As; ClientRegistry is the same instance /authorize
+// uses, so a code minted without PKCE is redeemable only by the
+// confidential client that secret-authenticates here. Wiring the
+// DeviceCodeStore in unconditionally turns the RFC 8628 grant branch on
+// for every tempogate deployment — opting back out would mean removing
+// the /device_authorization registrar as well, so the consistent posture
+// is to expose the whole device flow or none of it.
+func newToken(p tokenParams) *Token {
+	return NewToken(p.Store, p.Signer, p.Clients, WithDeviceCodeStore(p.Devices))
+}
+
+// newTokenRegistrar exposes the shared *Token's HTTP surface as a registrar
+// in the api_registrars group.
+func newTokenRegistrar(t *Token) func(huma.API) {
 	return t.Register
 }
 
@@ -171,6 +181,7 @@ type deviceUIParams struct {
 	Devices  DeviceCodeStore
 	Sessions *SessionManager
 	Clients  ClientRegistry
+	Token    *Token
 	Logger   *slog.Logger
 
 	Issuer             string `name:"oidc_issuer"`
@@ -195,7 +206,7 @@ func newDeviceUIRegistrar(p deviceUIParams) (func(huma.API), error) {
 	if len(key) != sessionSigningKeyBytes {
 		return nil, fmt.Errorf("oidc: OIDC__SESSION_SIGNING_KEY must decode to %d bytes, got %d", sessionSigningKeyBytes, len(key))
 	}
-	ui, err := NewDeviceUI(p.Devices, p.Sessions, p.Clients, key, p.Issuer,
+	ui, err := NewDeviceUI(p.Devices, p.Sessions, p.Clients, p.Token, key, p.Issuer,
 		// Whitelist the upstream IdP's origin in the device_enter page's CSP
 		// form-action directive. CSP3 checks form-action across the redirect
 		// chain (POST /device → 303 /authorize → 302 upstream), so the
@@ -223,6 +234,7 @@ func Fx() fx.Option {
 	return fx.Options(
 		fx.Provide(newClientRegistry),
 		fx.Provide(newSessionManager),
+		fx.Provide(newToken),
 		fx.Provide(
 			fx.Annotate(
 				newAuthorizeRegistrar,

@@ -215,19 +215,38 @@ func (t *Token) handle(ctx context.Context, in *tokenInput) (*tokenOutput, error
 	}
 }
 
-func (t *Token) authorizationCodeGrant(ctx context.Context, form url.Values, authHeader string) (*tokenOutput, error) {
-	code := form.Get("code")
-	if code == "" {
-		return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code is required")
-	}
+// AuthCodeRedemptionRequest is the parsed input to the auth-code-grant
+// redemption step — already past form parsing, Basic-auth parsing, and the
+// PKCE-vs-secret carve-out routing. The public POST /token handler and the
+// device-flow verification UI both build one of these and hand it to
+// RedeemAuthorizationCode; neither needs an HTTP round-trip to do so.
+type AuthCodeRedemptionRequest struct {
+	Code         string
+	ClientID     string
+	RedirectURI  string
+	CodeVerifier string // PKCE; empty when authenticating by client secret.
+	ClientSecret string // empty when authenticating by PKCE.
+}
 
-	basicID, basicSecret, hasBasic := parseBasicAuth(authHeader)
-	verifier := form.Get("code_verifier")
-	clientID := form.Get("client_id")
-	presentedSecret := form.Get("client_secret")
-	if hasBasic {
-		clientID = basicID
-		presentedSecret = basicSecret
+// AuthCodeRedemption is the consumed AuthCode's claims, ready for either
+// id-token minting (the public /token handler) or in-process session
+// issuance (the device-flow verification UI).
+type AuthCodeRedemption struct {
+	Email    string
+	ClientID string
+	Nonce    string
+}
+
+// RedeemAuthorizationCode validates a presented authorization code,
+// consumes it single-use, runs the PKCE-or-client-secret proof appropriate
+// to how the code was minted, and returns the code's claims. No HTTP shape
+// involved — callers have already parsed their inputs. Errors are returned
+// as OAuth2-shaped huma.StatusErrors via oauthErr so the public /token
+// handler can propagate them verbatim; in-process callers can inspect
+// errors.Is(..., huma.StatusError) or just surface the message.
+func (t *Token) RedeemAuthorizationCode(ctx context.Context, in AuthCodeRedemptionRequest) (*AuthCodeRedemption, error) {
+	if in.Code == "" {
+		return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code is required")
 	}
 
 	// A request that proves neither PKCE possession nor a client secret is
@@ -236,11 +255,11 @@ func (t *Token) authorizationCodeGrant(ctx context.Context, form url.Values, aut
 	// required is decided post-consume from the code's own challenge, so the
 	// strict default cannot be downgraded by a confidential-looking
 	// request against a public client's code.)
-	if verifier == "" && presentedSecret == "" {
+	if in.CodeVerifier == "" && in.ClientSecret == "" {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code_verifier (PKCE) or client authentication is required")
 	}
 
-	ac, err := t.store.ConsumeAuthCode(ctx, code)
+	ac, err := t.store.ConsumeAuthCode(ctx, in.Code)
 	if errors.Is(err, ErrAuthCodeNotFound) {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "unknown or already-redeemed authorization code")
 	}
@@ -251,10 +270,10 @@ func (t *Token) authorizationCodeGrant(ctx context.Context, form url.Values, aut
 	if t.now().After(ac.ExpiresAt) {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "authorization code expired")
 	}
-	if clientID != ac.ClientID {
+	if in.ClientID != ac.ClientID {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "client_id does not match the authorization request")
 	}
-	if form.Get("redirect_uri") != ac.RedirectURI {
+	if in.RedirectURI != ac.RedirectURI {
 		return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "redirect_uri does not match the authorization request")
 	}
 
@@ -265,17 +284,39 @@ func (t *Token) authorizationCodeGrant(ctx context.Context, form url.Values, aut
 	// carve-out, gated at /authorize on IsConfidential) falls through to
 	// client-secret authentication.
 	if ac.CodeChallenge != "" {
-		if verifier == "" {
+		if in.CodeVerifier == "" {
 			return nil, oauthErr(http.StatusBadRequest, "invalid_request", "code_verifier is required (PKCE)")
 		}
-		if !verifyPKCE(verifier, ac.CodeChallenge) {
+		if !verifyPKCE(in.CodeVerifier, ac.CodeChallenge) {
 			return nil, oauthErr(http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 		}
-	} else if !t.clients.Authenticate(ac.ClientID, presentedSecret) {
+	} else if !t.clients.Authenticate(ac.ClientID, in.ClientSecret) {
 		return nil, oauthErr(http.StatusUnauthorized, "invalid_client", "client authentication failed")
 	}
 
-	return t.issue(ctx, ac.Email, ac.ClientID, ac.Nonce)
+	return &AuthCodeRedemption{Email: ac.Email, ClientID: ac.ClientID, Nonce: ac.Nonce}, nil
+}
+
+func (t *Token) authorizationCodeGrant(ctx context.Context, form url.Values, authHeader string) (*tokenOutput, error) {
+	basicID, basicSecret, hasBasic := parseBasicAuth(authHeader)
+	clientID := form.Get("client_id")
+	presentedSecret := form.Get("client_secret")
+	if hasBasic {
+		clientID = basicID
+		presentedSecret = basicSecret
+	}
+
+	r, err := t.RedeemAuthorizationCode(ctx, AuthCodeRedemptionRequest{
+		Code:         form.Get("code"),
+		ClientID:     clientID,
+		RedirectURI:  form.Get("redirect_uri"),
+		CodeVerifier: form.Get("code_verifier"),
+		ClientSecret: presentedSecret,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return t.issue(ctx, r.Email, r.ClientID, r.Nonce)
 }
 
 func (t *Token) refreshTokenGrant(ctx context.Context, form url.Values) (*tokenOutput, error) {

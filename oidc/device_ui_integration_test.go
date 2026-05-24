@@ -94,27 +94,24 @@ func (s *DeviceUIIntegrationSuite) SetupTest() {
 	token := oidc.NewToken(store, signer, reg, oidc.WithDeviceCodeStore(store))
 	deviceAuth := oidc.NewDeviceAuthorization(store, reg, s.issuer)
 
-	// Bind a TLS listener first so the device-ui can be constructed with
-	// the loopback /token URL pinned at construction time. Secure cookies
-	// require an https origin for the jar to send them back; the
-	// production cookie attribute set is non-tunable (Secure + HttpOnly +
-	// SameSite=Lax), so the integration server has to be TLS for the
-	// session round-trip to be exercised faithfully. The handler is
-	// attached just before StartTLS() — httptest leaves both halves
-	// independently mutable until then.
-	srv := httptest.NewUnstartedServer(nil)
-	tokenURL := "https://" + srv.Listener.Addr().String() + "/token"
-
-	// The mock upstream IdP runs on a separate httptest.NewServer (plain
-	// http on 127.0.0.1) from the tempogate test server (TLS on a different
-	// port) — i.e., a different origin from the issuer. This is the same
-	// cross-origin shape every production Google deployment has, and is
-	// what triggers the CSP form-action regression. Wiring the upstream
-	// auth endpoint here so the device_enter page's CSP whitelists that
-	// origin is what lets the post-submit redirect chain reach the IdP.
-	deviceUI, err := oidc.NewDeviceUI(store, sessions, reg, s.signKey, s.issuer,
-		oidc.WithInternalTokenURL(tokenURL),
-		oidc.WithDeviceUIHTTPClient(insecureTLSClient()),
+	// The integration server is httptest TLS so the production cookie
+	// attribute set (Secure + HttpOnly + SameSite=Lax) is exercised
+	// faithfully — Secure cookies require an https origin for the jar to
+	// send them back. The mock upstream IdP runs on a separate
+	// httptest.NewServer (plain http on 127.0.0.1) from the tempogate test
+	// server (TLS on a different port) — i.e., a different origin from the
+	// issuer. This is the same cross-origin shape every production Google
+	// deployment has, and is what triggered the CSP form-action regression
+	// the upstream-origin option in the device-ui pins. Wiring the
+	// upstream auth endpoint here so the device_enter page's CSP
+	// whitelists that origin is what lets the post-submit redirect chain
+	// reach the IdP.
+	//
+	// DeviceUI hands the SSO-callback auth-code redemption to the shared
+	// *Token in-process — no loopback HTTPS POST back to its own /token
+	// endpoint, so the integration suite no longer needs a tokenURL or a
+	// trust-store-relaxed HTTP client for that hop.
+	deviceUI, err := oidc.NewDeviceUI(store, sessions, reg, token, s.signKey, s.issuer,
 		oidc.WithUpstreamIDPOrigin(s.mg.issuer()+"/auth"),
 	)
 	s.Require().NoError(err)
@@ -127,7 +124,7 @@ func (s *DeviceUIIntegrationSuite) SetupTest() {
 		api.WithRegistrar(deviceAuth.Register),
 		api.WithRegistrar(deviceUI.Register),
 	)
-	srv.Config.Handler = result.Public.Handler
+	srv := httptest.NewUnstartedServer(result.Public.Handler)
 	srv.StartTLS()
 	s.T().Cleanup(srv.Close)
 	s.srv = srv
@@ -152,8 +149,8 @@ func (s *DeviceUIIntegrationSuite) SetupTest() {
 //  2. Human: GET /device → POST user_code → 303 /authorize.
 //  3. /authorize → mock Google → /callback/google → 302 to
 //     /device/sso-callback.
-//  4. /device/sso-callback redeems the auth code at the loopback /token,
-//     mints a session cookie, 303 to /device/confirm.
+//  4. /device/sso-callback redeems the auth code in-process via the
+//     shared *Token, mints a session cookie, 303 to /device/confirm.
 //  5. Human: GET /device/confirm → renders the Approve form.
 //  6. Human: POST /device/approve → row flipped, success page rendered.
 //  7. CLI: POST /token (device_code grant) → JWT for the authenticated
@@ -400,13 +397,9 @@ func (s *DeviceUIIntegrationSuite) driveThroughConfirm(userCode string) {
 
 // insecureTLSTransport trusts any TLS peer — fine here because the only
 // peer is the suite's own httptest server. Pulled into a helper so both
-// clients and the loopback /token http.Client share the same setting.
+// the browser and CLI test clients share the same setting.
 func insecureTLSTransport() *http.Transport {
 	return &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // test-only loopback peer
-}
-
-func insecureTLSClient() *http.Client {
-	return &http.Client{Transport: insecureTLSTransport()}
 }
 
 // sessionSID extracts the opaque sid out of the SessionManager cookie the

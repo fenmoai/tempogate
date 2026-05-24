@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -106,6 +105,25 @@ var ErrInternalDeviceUIClientNotConfidential = errors.New("oidc: internal device
 // upstream IdP shares the issuer's origin.
 var ErrInvalidUpstreamIDPOrigin = errors.New("oidc: upstream IdP authorization endpoint must be an absolute URL with scheme and host")
 
+// ErrNilAuthCodeRedeemer is returned by NewDeviceUI when no redeemer is
+// passed. The SSO callback cannot complete without one, and a nil seam
+// would surface only at the first user form-submit; fail at construction
+// instead.
+var ErrNilAuthCodeRedeemer = errors.New("oidc: device-ui requires a non-nil AuthCodeRedeemer")
+
+// AuthCodeRedeemer is the narrow seam DeviceUI uses to turn the
+// upstream-IdP-bounced authorization code into the consumed AuthCode's
+// claims. *Token satisfies it structurally, and that is the production
+// wiring — the SSO callback runs the same single-use consumption + proof
+// check that the public /token endpoint runs, just without an HTTPS
+// round-trip back through the issuer URL. Declared on the consumer side
+// so DeviceUI's compile-time view of its Token dependency is just this
+// one method (no access to id-token minting, refresh tokens, or the
+// device-code grant).
+type AuthCodeRedeemer interface {
+	RedeemAuthorizationCode(ctx context.Context, in AuthCodeRedemptionRequest) (*AuthCodeRedemption, error)
+}
+
 // DeviceUI serves the human-side of the RFC 8628 §3.3 verification flow:
 // the user_code entry form, the SSO bounce through tempogate's own
 // /idp/authorize chain (acting as the internal tempogate-device-ui client),
@@ -115,12 +133,11 @@ type DeviceUI struct {
 	devices              DeviceCodeStore
 	sessions             *SessionManager
 	clients              ClientRegistry
+	redeemer             AuthCodeRedeemer
 	signingKey           []byte
 	issuer               string
 	internalClientID     string
 	internalClientSecret string
-	tokenURL             string
-	httpClient           *http.Client
 	now                  func() time.Time
 	newStateNonce        func() (string, error)
 	pages                map[string]*template.Template
@@ -145,8 +162,8 @@ type DeviceUI struct {
 }
 
 // DeviceUIOption configures a DeviceUI at construction. Every seam a test
-// might want to control — clock, state nonce, internal client id, token URL,
-// HTTP client — is reachable here so production code stays on the defaults.
+// might want to control — clock, state nonce, internal client id — is
+// reachable here so production code stays on the defaults.
 type DeviceUIOption func(*DeviceUI)
 
 // WithDeviceUIClock swaps the clock used to stamp signed state expirations
@@ -166,21 +183,6 @@ func WithInternalClientID(id string) DeviceUIOption {
 // For tests — production uses crypto/rand.
 func WithDeviceUIStateNonceGenerator(fn func() (string, error)) DeviceUIOption {
 	return func(u *DeviceUI) { u.newStateNonce = fn }
-}
-
-// WithInternalTokenURL overrides the URL the sso-callback handler POSTs to
-// for code redemption. Defaults to <issuer>/token. Integration tests point
-// it at their httptest server because the issuer constant cannot mirror the
-// ephemeral test URL.
-func WithInternalTokenURL(rawURL string) DeviceUIOption {
-	return func(u *DeviceUI) { u.tokenURL = rawURL }
-}
-
-// WithDeviceUIHTTPClient swaps the http.Client used for the internal /token
-// POST. The default http.DefaultClient is fine in production because the
-// call is loopback; tests may inject a client with a custom transport.
-func WithDeviceUIHTTPClient(c *http.Client) DeviceUIOption {
-	return func(u *DeviceUI) { u.httpClient = c }
 }
 
 // WithDeviceUILogger threads the operator-facing structured log sink into
@@ -216,32 +218,37 @@ func WithUpstreamIDPOrigin(rawAuthEndpoint string) DeviceUIOption {
 // present in clients and carry a non-empty secret; missing or public
 // registrations surface as ErrInternalDeviceUIClient... here so a
 // misconfigured deployment fails at construction rather than on the first
-// user form-submit.
+// user form-submit. redeemer is the in-process seam that turns the
+// upstream-IdP-bounced authorization code into the consumed AuthCode's
+// claims — the SSO callback uses it instead of POSTing back to its own
+// /token endpoint over the issuer URL, sidestepping the TLS, DNS, and
+// ingress failure modes that loopback introduced.
 func NewDeviceUI(
 	devices DeviceCodeStore,
 	sessions *SessionManager,
 	clients ClientRegistry,
+	redeemer AuthCodeRedeemer,
 	signingKey []byte,
 	issuer string,
 	opts ...DeviceUIOption,
 ) (*DeviceUI, error) {
+	if redeemer == nil {
+		return nil, ErrNilAuthCodeRedeemer
+	}
 	trimmedIssuer := strings.TrimRight(issuer, "/")
 	u := &DeviceUI{
 		devices:          devices,
 		sessions:         sessions,
 		clients:          clients,
+		redeemer:         redeemer,
 		signingKey:       signingKey,
 		issuer:           trimmedIssuer,
 		internalClientID: DefaultInternalDeviceUIClientID,
-		httpClient:       http.DefaultClient,
 		now:              func() time.Time { return time.Now().UTC() },
 		newStateNonce:    randomDeviceStateNonce,
 	}
 	for _, o := range opts {
 		o(u)
-	}
-	if u.tokenURL == "" {
-		u.tokenURL = trimmedIssuer + TokenPath
 	}
 	if u.logger == nil {
 		u.logger = slog.New(slog.DiscardHandler)
@@ -683,66 +690,24 @@ func (u *DeviceUI) handleDecision(ctx context.Context, in *deviceDecisionInput, 
 	return u.htmlPage(body), nil
 }
 
-// redeemAuthCode posts the loopback /token call that turns the auth code
-// the upstream callback minted into an access/id token, then decodes the
-// id_token's email claim. The token was just signed by tempogate itself
-// inside this same process, so the payload is authoritative without a
-// signature re-check here — the cost of pulling in keys.Verifier just to
-// reverify our own freshly minted token isn't paid back by the threat
-// model.
+// redeemAuthCode turns the auth code the upstream callback minted into the
+// email claim by running the same single-use consumption + proof check the
+// public /token endpoint runs — but in-process, against the shared *Token
+// instance. No HTTPS round-trip, no JWT decode dance: the email comes back
+// directly from the consumed AuthCode row. Eliminating the loopback also
+// eliminates the TLS-chain, DNS-resolution, and hairpin-routing failure
+// surfaces a deployment's ingress would otherwise contribute.
 func (u *DeviceUI) redeemAuthCode(ctx context.Context, code string) (string, error) {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("code", code)
-	form.Set("redirect_uri", u.issuer+DeviceSSOCallbackPath)
-	form.Set("client_id", u.internalClientID)
-	form.Set("client_secret", u.internalClientSecret)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.tokenURL, strings.NewReader(form.Encode()))
+	r, err := u.redeemer.RedeemAuthorizationCode(ctx, AuthCodeRedemptionRequest{
+		Code:         code,
+		ClientID:     u.internalClientID,
+		ClientSecret: u.internalClientSecret,
+		RedirectURI:  u.issuer + DeviceSSOCallbackPath,
+	})
 	if err != nil {
-		return "", fmt.Errorf("oidc: build internal /token request: %w", err)
+		return "", fmt.Errorf("oidc: in-process auth code redemption: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := u.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("oidc: internal /token round-trip: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return "", fmt.Errorf("oidc: internal /token status %d", resp.StatusCode)
-	}
-
-	var body struct {
-		IDToken string `json:"id_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", fmt.Errorf("oidc: decode internal /token response: %w", err)
-	}
-	if body.IDToken == "" {
-		return "", errors.New("oidc: internal /token returned no id_token")
-	}
-
-	parts := strings.SplitN(body.IDToken, ".", 3)
-	if len(parts) != 3 {
-		return "", errors.New("oidc: malformed id_token")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", fmt.Errorf("oidc: decode id_token payload: %w", err)
-	}
-	var claims struct {
-		Email string `json:"email"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fmt.Errorf("oidc: parse id_token claims: %w", err)
-	}
-	if claims.Email == "" {
-		return "", errors.New("oidc: id_token has no email claim")
-	}
-	return claims.Email, nil
+	return r.Email, nil
 }
 
 // signBounceState wraps a canonical user_code into the HMAC-signed,
