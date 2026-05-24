@@ -3,6 +3,7 @@ package oidc_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,6 +59,11 @@ func (s *FxSuite) supplyConfigFull(clients, secrets, signingKeyB64 string) fx.Op
 		fx.Provide(func() oidc.Upstream { return &fakeUpstream{} }),
 		fx.Provide(func() *keys.Signer { return keys.NewSigner() }),
 		fx.Provide(func() *keys.Verifier { return keys.NewVerifier() }),
+		// Discard-handler logger satisfies the DeviceUI logger dependency
+		// the production fx graph wires from the log package. The fx-graph
+		// regression guards in this suite assert wiring shape, not log
+		// output — those assertions live in device_ui_test.go.
+		fx.Provide(func() *slog.Logger { return slog.New(slog.DiscardHandler) }),
 		fx.Supply(
 			fx.Annotated{Name: "oidc_issuer", Target: testIssuer},
 			fx.Annotated{Name: "oidc_clients", Target: clients},

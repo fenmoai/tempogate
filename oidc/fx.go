@@ -3,6 +3,7 @@ package oidc
 import (
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -170,6 +171,7 @@ type deviceUIParams struct {
 	Devices  DeviceCodeStore
 	Sessions *SessionManager
 	Clients  ClientRegistry
+	Logger   *slog.Logger
 
 	Issuer             string `name:"oidc_issuer"`
 	SigningKeyB64      string `name:"oidc_session_signing_key"`
@@ -200,6 +202,11 @@ func newDeviceUIRegistrar(p deviceUIParams) (func(huma.API), error) {
 		// cross-origin hop is silently dropped by the browser unless this
 		// source is present.
 		WithUpstreamIDPOrigin(p.GoogleAuthEndpoint),
+		// Surface the device-flow SSO callback failure modes through the
+		// project's structured logger. Without this, every callback failure
+		// collapses into the same generic HTML page with no log trail and
+		// the operator has no way to diagnose a stuck device flow.
+		WithDeviceUILogger(p.Logger),
 	)
 	if err != nil {
 		return nil, err
