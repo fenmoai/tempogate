@@ -43,9 +43,11 @@ becomes `OIDC__GOOGLE__CLIENT_ID`.
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `OIDC__ISSUER` | for real deploys | `http://127.0.0.1:8000` | Externally reachable base URL; advertised as `issuer`, derives `jwks_uri`. May include a path for [sub-path hosting](#sub-path-hosting). |
-| `OIDC__CLIENTS` | for any login | _(empty)_ | Comma-separated `id:redirect_uri_prefix`. The first `:` splits id from prefix, so the prefix may contain a scheme. **Every client here is public — PKCE is mandatory.** Register the CLI as `tempogate-cli:http://127.0.0.1:`. |
-| `OIDC__CLIENT_SECRETS` | no | _(empty)_ | Comma-separated `id:secret`. The deliberately-separate, auditable opt-in that promotes a registered client to **confidential** (the PKCE carve-out) — e.g. the Temporal Web UI, which does not implement PKCE. An entry for an unregistered id fails fast. See [docs/pkce-and-confidential-clients.md](pkce-and-confidential-clients.md). |
+| `OIDC__CLIENTS` | for any login | _(empty)_ | Comma-separated `id:redirect_uri_prefix`. The first `:` splits id from prefix, so the prefix may contain a scheme. **Every client here is public — PKCE is mandatory.** Register the loopback CLI as `tempogate-cli:http://127.0.0.1:`; the device flow additionally needs `tempogate-device:` (no redirect URI — the CLI does not use one) and `tempogate-device-ui:<issuer>/device/sso-callback` (see [docs/cli-device-login.md](cli-device-login.md)). |
+| `OIDC__CLIENT_SECRETS` | no | _(empty)_ | Comma-separated `id:secret`. The deliberately-separate, auditable opt-in that promotes a registered client to **confidential** (the PKCE carve-out) — e.g. the Temporal Web UI, which does not implement PKCE; also `tempogate-device-ui`, which tempogate uses as a client of itself when bouncing the verification page through Google SSO. An entry for an unregistered id fails fast. See [docs/pkce-and-confidential-clients.md](pkce-and-confidential-clients.md). |
 | `OIDC__ALLOWED_DOMAINS` | for any login | _(empty)_ | Comma-separated, exact-match email-domain gate applied to Google's verified email after sign-in. **Empty means nobody is admitted.** |
+| `OIDC__SESSION_SIGNING_KEY` | yes | _(empty)_ | Base64url-encoded 32-byte HMAC key. Signs the verification-page session cookie and the SSO-bounce `state` parameter used by the [device flow](cli-device-login.md). Generate once with `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='`, keep stable across rolling restarts, and supply via a Secret. **Tempogate refuses to boot** if this is empty, not base64url, or does not decode to exactly 32 bytes. |
+| `OIDC__SESSION_TTL` | no | `5m` | Go duration; TTL of the verification-page session cookie used by the [device flow](cli-device-login.md). The cookie is path-scoped to the device-flow routes (e.g. `/device*` at a root issuer, `<issuer-path>/device*` under [sub-path hosting](#sub-path-hosting)) and is not a general-purpose login session — keeping it short bounds how long an approval window stays open. |
 | `OIDC__GOOGLE__CLIENT_ID` | for any login | _(empty)_ | Upstream Google OAuth client id. |
 | `OIDC__GOOGLE__CLIENT_SECRET` | for any login | _(empty)_ | Upstream Google OAuth client secret. Supply via a Secret; never commit it. |
 | `OIDC__GOOGLE__AUTH_ENDPOINT` | no | `https://accounts.google.com/o/oauth2/v2/auth` | Override only to point the flow at a mock IdP (testing/examples). |
@@ -53,8 +55,8 @@ becomes `OIDC__GOOGLE__CLIENT_ID`.
 | `OIDC__GOOGLE__ISSUER_URL` | no | `https://accounts.google.com` | Expected `iss` of Google's `id_token` and the OIDC-discovery/JWKS base the callback verifies its signature against. Override for a mock IdP. |
 
 **Minimum for real SSO:** `OIDC__ISSUER`, `OIDC__CLIENTS`,
-`OIDC__ALLOWED_DOMAINS`, `OIDC__GOOGLE__CLIENT_ID`,
-`OIDC__GOOGLE__CLIENT_SECRET`.
+`OIDC__ALLOWED_DOMAINS`, `OIDC__SESSION_SIGNING_KEY`,
+`OIDC__GOOGLE__CLIENT_ID`, `OIDC__GOOGLE__CLIENT_SECRET`.
 
 ### Client-side (the `tempogate` CLI, not the server)
 

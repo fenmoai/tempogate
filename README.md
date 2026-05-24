@@ -210,7 +210,7 @@ the [chart releases](https://github.com/fenmoai/tempogate/releases?q=chart-v).
 
 ## Personal tokens from a laptop
 
-Once the server is reachable, an engineer mints a short-lived Temporal JWT
+Once the server is reachable, a user mints a short-lived Temporal JWT
 without hand-editing any config:
 
 ```bash
@@ -229,6 +229,12 @@ minutes before expiry, so it never re-opens a browser. Both print only the
 token to stdout, so they are safe in `$(...)`. See
 [docs/cli-loopback-login.md](docs/cli-loopback-login.md) for persistence,
 auto-refresh, the operator one-liner, and why ephemeral ports work.
+
+For hosts without a browser (remote SSH sessions, cloud dev VMs, CI debug
+shells), use `tempogate login --device` — the OAuth 2.0 device authorization
+grant ([RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)); the CLI
+prints a short code and a URL you open on any other device with a browser.
+See [docs/cli-device-login.md](docs/cli-device-login.md).
 
 ## Configuration
 
@@ -319,6 +325,8 @@ directly. See [CONTRIBUTING.md](CONTRIBUTING.md).
   variable, with precedence and sub-path hosting
 - [docs/cli-loopback-login.md](docs/cli-loopback-login.md) — the
   `tempogate login` loopback flow, persistence, and auto-refresh
+- [docs/cli-device-login.md](docs/cli-device-login.md) — the
+  `tempogate login --device` flow for hosts without a browser (RFC 8628)
 - [docs/pkce-and-confidential-clients.md](docs/pkce-and-confidential-clients.md)
   — PKCE posture and the confidential-client carve-out
 - [examples/docker-compose/](examples/docker-compose/README.md) — the full

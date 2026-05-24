@@ -40,7 +40,7 @@ Temporal and an OAuth2 client of Google.
    `permissions` claim. No Temporal-side custom code.
 
 `tempogate login` runs the same OIDC flow from a laptop over an ephemeral
-`127.0.0.1` loopback port, giving engineers and unattended machines the same
+`127.0.0.1` loopback port, giving users and unattended machines the same
 tokens without a kept-open browser
 ([docs/cli-loopback-login.md](cli-loopback-login.md)).
 

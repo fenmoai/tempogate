@@ -1,8 +1,16 @@
 # `tempogate login` — the loopback CLI flow
 
-This document explains how an engineer obtains a personal Temporal JWT from a
+This document explains how a user obtains a personal Temporal JWT from a
 laptop, how the loopback redirect works, and **why ephemeral loopback ports
 work out of the box** without anyone touching a Google Cloud Console.
+
+> **No browser on this host?** A remote SSH session, a cloud dev VM, or a CI
+> debug shell cannot satisfy the loopback redirect because the browser sign-in
+> needs to happen *on the same machine* as the CLI. For those, use
+> `tempogate login --device` — the OAuth 2.0 device authorization grant
+> ([RFC 8628]) — instead. See [cli-device-login.md](cli-device-login.md).
+
+[RFC 8628]: https://datatracker.ietf.org/doc/html/rfc8628
 
 ## TL;DR
 
@@ -76,12 +84,12 @@ client registry matches `redirect_uri` by prefix, so:
   next character after `127.0.0.1` must be `:`, not `.`.
 
 If you prefer a fixed port, register `tempogate-cli:http://127.0.0.1:39473/`
-and have engineers run `tempogate login --port 39473`.
+and have users run `tempogate login --port 39473`.
 
 The signed-in email must also pass `OIDC__ALLOWED_DOMAINS`, the same gate the
 Web UI flow uses.
 
-## Engineer usage
+## Usage
 
 ```bash
 export TEMPOGATE__ISSUER=https://tempogate.example.com
