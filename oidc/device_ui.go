@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -232,7 +233,14 @@ func NewDeviceUI(
 	issuer string,
 	opts ...DeviceUIOption,
 ) (*DeviceUI, error) {
-	if redeemer == nil {
+	// Catch both the untyped nil and a typed-nil interface value (e.g. a
+	// caller that built `var t *Token = nil; NewDeviceUI(..., t, ...)`):
+	// `redeemer == nil` only fires on the former, but the latter would
+	// still satisfy the interface at compile time and panic on the first
+	// SSO callback when RedeemAuthorizationCode dispatches to a nil
+	// receiver. Reflect once at construction so the failure surfaces
+	// here, not at the first user-visible request.
+	if v := reflect.ValueOf(redeemer); !v.IsValid() || (v.Kind() == reflect.Pointer && v.IsNil()) {
 		return nil, ErrNilAuthCodeRedeemer
 	}
 	trimmedIssuer := strings.TrimRight(issuer, "/")

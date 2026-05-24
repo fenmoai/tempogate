@@ -1242,7 +1242,10 @@ func TestNewDeviceUIRejectsPublicInternalClient(t *testing.T) {
 
 // TestNewDeviceUIRejectsNilRedeemer pins the fail-fast on the new
 // dependency: a nil AuthCodeRedeemer would surface as a nil-pointer panic
-// at the first SSO callback otherwise.
+// at the first SSO callback otherwise. Both the untyped nil and a
+// typed-nil interface value (the wiring-bug shape that `redeemer == nil`
+// alone would miss because the interface still carries type info) must
+// reject at construction.
 func TestNewDeviceUIRejectsNilRedeemer(t *testing.T) {
 	reg, err := oidc.ParseClientRegistry(deviceUIClientsRaw)
 	if err != nil {
@@ -1252,9 +1255,21 @@ func TestNewDeviceUIRejectsNilRedeemer(t *testing.T) {
 		t.Fatalf("with secrets: %v", err)
 	}
 	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
-	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, nil, []byte("0123456789abcdef0123456789abcdef"), testIssuer)
-	if !errors.Is(err, oidc.ErrNilAuthCodeRedeemer) {
-		t.Fatalf("expected ErrNilAuthCodeRedeemer, got %v", err)
+
+	cases := []struct {
+		name     string
+		redeemer oidc.AuthCodeRedeemer
+	}{
+		{"untyped nil", nil},
+		{"typed nil pointer", (*fakeAuthCodeRedeemer)(nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, tc.redeemer, []byte("0123456789abcdef0123456789abcdef"), testIssuer)
+			if !errors.Is(err, oidc.ErrNilAuthCodeRedeemer) {
+				t.Fatalf("expected ErrNilAuthCodeRedeemer, got %v", err)
+			}
+		})
 	}
 }
 
