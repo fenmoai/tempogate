@@ -151,51 +151,50 @@ func (s *statefulDeviceCodeStore) countDenied() int {
 	return len(s.denied)
 }
 
-// fakeTokenServer stands in for the real /token endpoint the sso-callback
-// posts to. The DeviceUI's redeem path is exercised by pointing
-// WithInternalTokenURL at it. The body it returns is a JWT-shaped string
-// whose middle segment base64url-decodes to a {email} JSON payload, which
-// matches the contract DeviceUI relies on (header.payload.signature).
-type fakeTokenServer struct {
-	srv      *httptest.Server
-	mu       sync.Mutex
-	email    string
-	status   int
-	calls    int
-	lastForm url.Values
+// fakeAuthCodeRedeemer stands in for the in-process *Token.RedeemAuthorizationCode
+// the SSO callback calls. Tests pre-stage the email (happy path) or an error
+// (failure path), and inspect lastReq to assert the exact AuthCodeRedemptionRequest
+// the device-flow surface built before handing it to the redeemer.
+type fakeAuthCodeRedeemer struct {
+	mu      sync.Mutex
+	email   string
+	err     error
+	calls   int
+	lastReq oidc.AuthCodeRedemptionRequest
 }
 
-func newFakeTokenServer(email string) *fakeTokenServer {
-	t := &fakeTokenServer{email: email, status: http.StatusOK}
-	t.srv = httptest.NewServer(http.HandlerFunc(t.handle))
-	return t
+func newFakeAuthCodeRedeemer(email string) *fakeAuthCodeRedeemer {
+	return &fakeAuthCodeRedeemer{email: email}
 }
 
-func (t *fakeTokenServer) handle(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	form, _ := url.ParseQuery(string(body))
-	t.mu.Lock()
-	t.calls++
-	t.lastForm = form
-	status, email := t.status, t.email
-	t.mu.Unlock()
-
-	if status != http.StatusOK {
-		w.WriteHeader(status)
-		return
+func (f *fakeAuthCodeRedeemer) RedeemAuthorizationCode(_ context.Context, in oidc.AuthCodeRedemptionRequest) (*oidc.AuthCodeRedemption, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lastReq = in
+	if f.err != nil {
+		return nil, f.err
 	}
-
-	payload, _ := json.Marshal(struct {
-		Email string `json:"email"`
-	}{Email: email})
-	jwt := "h." + base64.RawURLEncoding.EncodeToString(payload) + ".s"
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
-		IDToken string `json:"id_token"`
-	}{IDToken: jwt})
+	return &oidc.AuthCodeRedemption{Email: f.email, ClientID: in.ClientID}, nil
 }
 
-func (t *fakeTokenServer) Close() { t.srv.Close() }
+func (f *fakeAuthCodeRedeemer) setErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
+func (f *fakeAuthCodeRedeemer) snapshotLastReq() oidc.AuthCodeRedemptionRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastReq
+}
+
+func (f *fakeAuthCodeRedeemer) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
 
 type DeviceUISuite struct {
 	suite.Suite
@@ -205,7 +204,7 @@ type DeviceUISuite struct {
 	bsStore  *memBrowserSessionStore
 	ui       *oidc.DeviceUI
 	srv      *httptest.Server
-	tokenSrv *fakeTokenServer
+	redeemer *fakeAuthCodeRedeemer
 	client   *http.Client
 	clients  oidc.ClientRegistry
 	key      []byte
@@ -241,12 +240,11 @@ func (s *DeviceUISuite) SetupTest() {
 	s.Require().NoError(reg.WithSecrets("tempogate-device-ui:" + deviceUIInternalSecret))
 	s.clients = reg
 
-	s.tokenSrv = newFakeTokenServer(deviceUITestEmail)
+	s.redeemer = newFakeAuthCodeRedeemer(deviceUITestEmail)
 
-	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.redeemer, s.key, testIssuer,
 		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
 		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
-		oidc.WithInternalTokenURL(s.tokenSrv.srv.URL),
 	)
 	s.Require().NoError(err)
 	s.ui = ui
@@ -264,7 +262,6 @@ func (s *DeviceUISuite) SetupTest() {
 
 func (s *DeviceUISuite) TearDownTest() {
 	s.srv.Close()
-	s.tokenSrv.Close()
 }
 
 // seedSession injects a valid signed cookie into a request so the handler's
@@ -433,9 +430,12 @@ func (s *DeviceUISuite) TestEnterPostErrorPaths() {
 	}
 }
 
-// TestSSOCallbackHappyPath drives the loopback /token round-trip, asserts a
-// session row was minted, and confirms the response carries a session
-// cookie + 303 to /device/confirm with the recovered user_code.
+// TestSSOCallbackHappyPath drives the in-process auth-code redemption,
+// asserts a session row was minted, and confirms the response carries a
+// session cookie + 303 to /device/confirm with the recovered user_code.
+// The redeemer's lastReq pins the exact AuthCodeRedemptionRequest the
+// callback built — client_id, secret, redirect_uri, code — proving the
+// in-process call carries the same parameters the old loopback POST did.
 func (s *DeviceUISuite) TestSSOCallbackHappyPath() {
 	state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
 	resp, err := s.client.Do(s.req(http.MethodGet, "/device/sso-callback?code=auth-code&state="+url.QueryEscape(state)))
@@ -456,9 +456,13 @@ func (s *DeviceUISuite) TestSSOCallbackHappyPath() {
 
 	s.Equal(1, s.bsStore.count())
 	s.Equal(deviceUITestEmail, s.bsStore.only().Email)
-	s.Equal(1, s.tokenSrv.calls)
-	s.Equal("authorization_code", s.tokenSrv.lastForm.Get("grant_type"))
-	s.Equal(deviceUIInternalSecret, s.tokenSrv.lastForm.Get("client_secret"))
+	s.Equal(1, s.redeemer.callCount())
+	req := s.redeemer.snapshotLastReq()
+	s.Equal("auth-code", req.Code)
+	s.Equal("tempogate-device-ui", req.ClientID)
+	s.Equal(deviceUIInternalSecret, req.ClientSecret)
+	s.Equal(testIssuer+"/device/sso-callback", req.RedirectURI)
+	s.Empty(req.CodeVerifier, "the internal device-ui client authenticates by secret, not PKCE")
 }
 
 func (s *DeviceUISuite) TestSSOCallbackErrorPaths() {
@@ -488,9 +492,7 @@ func (s *DeviceUISuite) TestSSOCallbackErrorPaths() {
 }
 
 func (s *DeviceUISuite) TestSSOCallbackTokenFailureRendersError() {
-	s.tokenSrv.mu.Lock()
-	s.tokenSrv.status = http.StatusBadRequest
-	s.tokenSrv.mu.Unlock()
+	s.redeemer.setErr(errors.New("simulated redemption failure"))
 
 	state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
 	resp, err := s.client.Do(s.req(http.MethodGet, "/device/sso-callback?code=auth-code&state="+url.QueryEscape(state)))
@@ -500,17 +502,18 @@ func (s *DeviceUISuite) TestSSOCallbackTokenFailureRendersError() {
 	s.Equal(http.StatusOK, resp.StatusCode)
 	body := readBody(s.T(), resp)
 	s.Contains(body, "could not be completed")
-	s.Zero(s.bsStore.count(), "no session must be minted when /token redemption fails")
+	s.Zero(s.bsStore.count(), "no session must be minted when in-process redemption fails")
 }
 
 // TestSSOCallbackLogsRedeemAuthCodeFailure pins the operator-visible
-// log shape for the most common SSO callback failure mode: the loopback
-// /token call returning a non-200. Without a structured log line here
-// the deployment is undiagnosable from `kubectl logs` — see FEN-1174 for
-// the broader observability work this seeds.
+// log shape for the SSO callback's most common failure mode: the
+// in-process auth-code redemption returning an error (single-use
+// already-consumed, expired code, PKCE/secret proof failure, etc.).
+// Without a structured log line here the deployment is undiagnosable
+// from container stdout.
 func (s *DeviceUISuite) TestSSOCallbackLogsRedeemAuthCodeFailure() {
 	var buf bytes.Buffer
-	ui, srv := s.deviceUIWithLogger(&buf, http.StatusBadRequest)
+	ui, srv := s.deviceUIWithLogger(&buf, errors.New("simulated redemption failure"))
 	defer srv.Close()
 	_ = ui
 
@@ -521,7 +524,7 @@ func (s *DeviceUISuite) TestSSOCallbackLogsRedeemAuthCodeFailure() {
 	s.Equal(http.StatusOK, resp.StatusCode)
 
 	line := decodeSingleLogLine(s.T(), buf.Bytes())
-	s.Equal("ERROR", line["level"], "loopback /token failure is an integration error, not a user error")
+	s.Equal("ERROR", line["level"], "in-process redemption failure is an integration error, not a user error")
 	s.Equal("device.sso_callback", line["op"])
 	s.Equal("redeem_auth_code", line["cause"])
 	s.NotEmpty(line["err"], "the underlying error message must reach the operator")
@@ -534,7 +537,7 @@ func (s *DeviceUISuite) TestSSOCallbackLogsRedeemAuthCodeFailure() {
 // user re-running the device flow but the rate is operator-relevant.
 func (s *DeviceUISuite) TestSSOCallbackLogsBounceStateVerificationFailure() {
 	var buf bytes.Buffer
-	ui, srv := s.deviceUIWithLogger(&buf, http.StatusOK)
+	ui, srv := s.deviceUIWithLogger(&buf, nil)
 	defer srv.Close()
 	_ = ui
 
@@ -556,7 +559,7 @@ func (s *DeviceUISuite) TestSSOCallbackLogsBounceStateVerificationFailure() {
 // neither value carries useful content here.
 func (s *DeviceUISuite) TestSSOCallbackLogsMissingCodeOrState() {
 	var buf bytes.Buffer
-	ui, srv := s.deviceUIWithLogger(&buf, http.StatusOK)
+	ui, srv := s.deviceUIWithLogger(&buf, nil)
 	defer srv.Close()
 	_ = ui
 
@@ -575,22 +578,19 @@ func (s *DeviceUISuite) TestSSOCallbackLogsMissingCodeOrState() {
 
 // deviceUIWithLogger spins up a fresh DeviceUI + httptest server wired
 // with a buffer-backed slog logger so each test owns its log output and
-// asserts on it in isolation. tokenStatus controls the fake /token
-// server's HTTP response — pass http.StatusOK for tests whose failure
-// is upstream of redeemAuthCode, http.StatusBadRequest (or any non-200)
-// to trigger the redeem failure path.
-func (s *DeviceUISuite) deviceUIWithLogger(buf *bytes.Buffer, tokenStatus int) (*oidc.DeviceUI, *httptest.Server) {
-	tokenSrv := newFakeTokenServer(deviceUITestEmail)
-	tokenSrv.mu.Lock()
-	tokenSrv.status = tokenStatus
-	tokenSrv.mu.Unlock()
-	s.T().Cleanup(tokenSrv.Close)
+// asserts on it in isolation. redeemerErr controls the in-process
+// redemption result — pass nil for tests whose failure is upstream of
+// redeemAuthCode, any error to trigger the redeem failure path.
+func (s *DeviceUISuite) deviceUIWithLogger(buf *bytes.Buffer, redeemerErr error) (*oidc.DeviceUI, *httptest.Server) {
+	redeemer := newFakeAuthCodeRedeemer(deviceUITestEmail)
+	if redeemerErr != nil {
+		redeemer.setErr(redeemerErr)
+	}
 
 	logger := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, redeemer, s.key, testIssuer,
 		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
 		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
-		oidc.WithInternalTokenURL(tokenSrv.srv.URL),
 		oidc.WithDeviceUILogger(logger),
 	)
 	s.Require().NoError(err)
@@ -620,8 +620,8 @@ func decodeSingleLogLine(t *testing.T, raw []byte) map[string]any {
 	return m
 }
 
-// assertNoSecretLeak is a guard the FEN-1174 acceptance criteria calls out
-// explicitly: no log line may emit secret material. Tests pass in the
+// assertNoSecretLeak is a standing guard on the device-ui observability
+// surface: no log line may emit secret material. Tests pass in the
 // concrete values they injected so a future regression that starts logging
 // the auth code, state nonce, or session SID fails loudly here.
 func assertNoSecretLeak(t *testing.T, raw []byte, secrets []string) {
@@ -894,57 +894,13 @@ func (s *DeviceUISuite) TestConfirmExpiredOrDecidedRowIsError() {
 	}
 }
 
-// TestSSOCallbackTokenResponseShapes covers the three id_token-shape error
-// branches inside redeemAuthCode: empty id_token, malformed JWT (no
-// dotted segments), and a token whose payload lacks an email claim.
-func (s *DeviceUISuite) TestSSOCallbackTokenResponseShapes() {
-	cases := []struct {
-		name string
-		body string
-	}{
-		{"empty id_token", `{"id_token":""}`},
-		{"malformed jwt", `{"id_token":"not-a-dotted-jwt"}`},
-		{"missing email claim", `{"id_token":"h.` + base64.RawURLEncoding.EncodeToString([]byte(`{}`)) + `.s"}`},
-		{"bad json", `not json`},
-	}
-	for _, tc := range cases {
-		s.Run(tc.name, func() {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, tc.body)
-			}))
-			defer srv.Close()
-
-			ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
-				oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
-				oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
-				oidc.WithInternalTokenURL(srv.URL),
-			)
-			s.Require().NoError(err)
-			mux := http.NewServeMux()
-			ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-shape", "0.0.0")))
-			localSrv := httptest.NewServer(mux)
-			defer localSrv.Close()
-
-			state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
-			resp, err := s.client.Get(localSrv.URL + "/device/sso-callback?code=auth-code&state=" + url.QueryEscape(state))
-			s.Require().NoError(err)
-			defer resp.Body.Close()
-			s.Equal(http.StatusOK, resp.StatusCode)
-			s.Contains(readBody(s.T(), resp), "could not be completed")
-			s.Zero(s.bsStore.count())
-		})
-	}
-}
-
 // TestEnterPostStateGeneratorErrorIsServerError exercises the bounce-state
 // nonce path where the generator returns an error. Such a failure can't
 // downgrade into a redirect — it must surface as a server-side 5xx.
 func (s *DeviceUISuite) TestEnterPostStateGeneratorErrorIsServerError() {
-	failing, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+	failing, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.redeemer, s.key, testIssuer,
 		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
 		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return "", errors.New("entropy exhausted") }),
-		oidc.WithInternalTokenURL(s.tokenSrv.srv.URL),
 	)
 	s.Require().NoError(err)
 	mux := http.NewServeMux()
@@ -1135,10 +1091,9 @@ func (s *DeviceUISuite) TestSessionUnexpectedLookupErrorIs500() {
 // still serves the rendered pages, but its Origin gate fails closed so a
 // misconfigured server can never accept the Approve form.
 func (s *DeviceUISuite) TestNewDeviceUITreatsBadIssuerSafely() {
-	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, ":::not-a-url",
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.redeemer, s.key, ":::not-a-url",
 		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
 		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
-		oidc.WithInternalTokenURL(s.tokenSrv.srv.URL),
 	)
 	s.Require().NoError(err, "NewDeviceUI should not fail on a syntactically odd issuer")
 	mux := http.NewServeMux()
@@ -1223,64 +1178,6 @@ func (s *DeviceUISuite) TestSSOCallbackVerifyBounceStateBranches() {
 	}
 }
 
-// TestSSOCallbackBadJWTPayloadJSON covers the json.Unmarshal-of-claims
-// branch in redeemAuthCode: a token whose payload base64-decodes to bytes
-// that are NOT valid JSON. Distinct from the "missing email" path —
-// here even the structural decode fails.
-func (s *DeviceUISuite) TestSSOCallbackBadJWTPayloadJSON() {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// Payload segment decodes to "not-json" — JSON unmarshal fails.
-		jwt := "h." + base64.RawURLEncoding.EncodeToString([]byte("not-json")) + ".s"
-		_, _ = io.WriteString(w, `{"id_token":"`+jwt+`"}`)
-	}))
-	defer srv.Close()
-
-	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
-		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
-		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
-		oidc.WithInternalTokenURL(srv.URL),
-	)
-	s.Require().NoError(err)
-	mux := http.NewServeMux()
-	ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-badjson", "0.0.0")))
-	local := httptest.NewServer(mux)
-	defer local.Close()
-
-	state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
-	resp, err := s.client.Get(local.URL + "/device/sso-callback?code=auth-code&state=" + url.QueryEscape(state))
-	s.Require().NoError(err)
-	defer resp.Body.Close()
-	s.Equal(http.StatusOK, resp.StatusCode)
-	s.Contains(readBody(s.T(), resp), "could not be completed")
-	s.Zero(s.bsStore.count())
-}
-
-// TestSSOCallbackUnreachableTokenServer covers the http.Client.Do error
-// path inside redeemAuthCode — exercised by pointing the device-ui at a
-// localhost:0 token URL that never accepts connections.
-func (s *DeviceUISuite) TestSSOCallbackUnreachableTokenServer() {
-	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
-		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
-		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
-		// Closed loopback port — Do() fails with connection refused.
-		oidc.WithInternalTokenURL("http://127.0.0.1:1/token"),
-		oidc.WithDeviceUIHTTPClient(&http.Client{Timeout: 100 * time.Millisecond}),
-	)
-	s.Require().NoError(err)
-	mux := http.NewServeMux()
-	ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-deadtoken", "0.0.0")))
-	local := httptest.NewServer(mux)
-	defer local.Close()
-
-	state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
-	resp, err := s.client.Get(local.URL + "/device/sso-callback?code=auth-code&state=" + url.QueryEscape(state))
-	s.Require().NoError(err)
-	defer resp.Body.Close()
-	s.Equal(http.StatusOK, resp.StatusCode)
-	s.Contains(readBody(s.T(), resp), "could not be completed")
-}
-
 // TestDecisionStoreErrorIs500 covers the non-sentinel error branch out of
 // ApproveDeviceCode / DenyDeviceCode: a deep store failure surfaces as a
 // 5xx, not a 200 error page, so an operator's monitoring sees it.
@@ -1323,7 +1220,7 @@ func TestNewDeviceUIRejectsMissingInternalClient(t *testing.T) {
 		t.Fatalf("parse clients: %v", err)
 	}
 	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
-	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, []byte("0123456789abcdef0123456789abcdef"), testIssuer)
+	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, newFakeAuthCodeRedeemer(""), []byte("0123456789abcdef0123456789abcdef"), testIssuer)
 	if !errors.Is(err, oidc.ErrInternalDeviceUIClientMissing) {
 		t.Fatalf("expected ErrInternalDeviceUIClientMissing, got %v", err)
 	}
@@ -1337,9 +1234,42 @@ func TestNewDeviceUIRejectsPublicInternalClient(t *testing.T) {
 	// Skip WithSecrets — the device-ui client stays public, which is the
 	// misconfiguration this asserts is caught.
 	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
-	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, []byte("0123456789abcdef0123456789abcdef"), testIssuer)
+	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, newFakeAuthCodeRedeemer(""), []byte("0123456789abcdef0123456789abcdef"), testIssuer)
 	if !errors.Is(err, oidc.ErrInternalDeviceUIClientNotConfidential) {
 		t.Fatalf("expected ErrInternalDeviceUIClientNotConfidential, got %v", err)
+	}
+}
+
+// TestNewDeviceUIRejectsNilRedeemer pins the fail-fast on the new
+// dependency: a nil AuthCodeRedeemer would surface as a nil-pointer panic
+// at the first SSO callback otherwise. Both the untyped nil and a
+// typed-nil interface value (the wiring-bug shape that `redeemer == nil`
+// alone would miss because the interface still carries type info) must
+// reject at construction.
+func TestNewDeviceUIRejectsNilRedeemer(t *testing.T) {
+	reg, err := oidc.ParseClientRegistry(deviceUIClientsRaw)
+	if err != nil {
+		t.Fatalf("parse clients: %v", err)
+	}
+	if err := reg.WithSecrets("tempogate-device-ui:" + deviceUIInternalSecret); err != nil {
+		t.Fatalf("with secrets: %v", err)
+	}
+	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
+
+	cases := []struct {
+		name     string
+		redeemer oidc.AuthCodeRedeemer
+	}{
+		{"untyped nil", nil},
+		{"typed nil pointer", (*fakeAuthCodeRedeemer)(nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, tc.redeemer, []byte("0123456789abcdef0123456789abcdef"), testIssuer)
+			if !errors.Is(err, oidc.ErrNilAuthCodeRedeemer) {
+				t.Fatalf("expected ErrNilAuthCodeRedeemer, got %v", err)
+			}
+		})
 	}
 }
 
@@ -1351,7 +1281,7 @@ func TestNewDeviceUIRejectsPublicInternalClient(t *testing.T) {
 // the cross-origin hop. The handler must surface the upstream origin into
 // the rendered CSP alongside 'self'.
 func (s *DeviceUISuite) TestEnterPageCSPIncludesUpstreamFormActionSource() {
-	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.redeemer, s.key, testIssuer,
 		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
 		oidc.WithUpstreamIDPOrigin("https://accounts.google.com/o/oauth2/v2/auth"),
 	)
@@ -1391,7 +1321,7 @@ func (s *DeviceUISuite) TestEnterPageCSPDefaultsToSelfWithoutUpstream() {
 // widening the directive there would be a needless loss of defense-in-
 // depth.
 func (s *DeviceUISuite) TestConfirmPageCSPStaysAtSelf() {
-	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.redeemer, s.key, testIssuer,
 		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
 		oidc.WithUpstreamIDPOrigin("https://accounts.google.com/o/oauth2/v2/auth"),
 	)
@@ -1442,7 +1372,7 @@ func TestNewDeviceUIRejectsInvalidUpstreamOrigin(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, key, testIssuer,
+			_, err := oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, newFakeAuthCodeRedeemer(""), key, testIssuer,
 				oidc.WithUpstreamIDPOrigin(tc.raw))
 			if !errors.Is(err, oidc.ErrInvalidUpstreamIDPOrigin) {
 				t.Fatalf("expected ErrInvalidUpstreamIDPOrigin for %q, got %v", tc.raw, err)
@@ -1479,7 +1409,7 @@ func TestNewDeviceUIUpstreamOriginVariants(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ui, err := oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, key, testIssuer,
+			ui, err := oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, newFakeAuthCodeRedeemer(""), key, testIssuer,
 				oidc.WithUpstreamIDPOrigin(tc.raw))
 			if err != nil {
 				t.Fatalf("construct: %v", err)
@@ -1531,7 +1461,7 @@ func TestNewDeviceUIAcceptsCustomInternalClientID(t *testing.T) {
 		t.Fatalf("with secrets: %v", err)
 	}
 	sm := oidc.NewSessionManager(newMemBrowserSessionStore(), []byte("0123456789abcdef0123456789abcdef"))
-	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, []byte("0123456789abcdef0123456789abcdef"), testIssuer,
+	_, err = oidc.NewDeviceUI(&memDeviceCodeStore{}, sm, reg, newFakeAuthCodeRedeemer(""), []byte("0123456789abcdef0123456789abcdef"), testIssuer,
 		oidc.WithInternalClientID("my-custom-ui"))
 	if err != nil {
 		t.Fatalf("custom client id should be honoured: %v", err)
@@ -1569,4 +1499,122 @@ func readBody(t *testing.T, resp *http.Response) string {
 		t.Fatalf("read body: %v", err)
 	}
 	return string(b)
+}
+
+// TestSSOCallbackCompletesWhenIssuerHostIsUnreachable is the load-bearing
+// guard on this package's promise that auth-code redemption does not
+// reach back through the issuer URL. The DeviceUI here is wired with an
+// issuer whose host is reserved-unresolvable by RFC 2606 (".invalid"
+// TLD); the auth code is seeded directly into an in-memory TokenStore,
+// and a real *Token consumes it in-process. If a future edit
+// reintroduces any kind of HTTP round-trip back through the issuer for
+// redemption, the call would fault on DNS resolution and the callback
+// would render the generic error page instead of the 303 to /device/confirm.
+func TestSSOCallbackCompletesWhenIssuerHostIsUnreachable(t *testing.T) {
+	const (
+		unreachableIssuer = "https://no-such-host.invalid/idp"
+		callbackPath      = "/device/sso-callback"
+		userCanonical     = "BCDFGHJK"
+		userDisplay       = "BCDF-GHJK"
+		stateNonce        = "fixed-state-nonce"
+		authCode          = "in-process-auth-code"
+		email             = "alice@example.com"
+		internalSecret    = "device-ui-secret"
+	)
+	now := time.Unix(1700000000, 0).UTC()
+	signingKey := []byte("0123456789abcdef0123456789abcdef")
+
+	reg, err := oidc.ParseClientRegistry("tempogate-device:cli,tempogate-device-ui:" + unreachableIssuer + callbackPath)
+	if err != nil {
+		t.Fatalf("parse clients: %v", err)
+	}
+	if err := reg.WithSecrets("tempogate-device-ui:" + internalSecret); err != nil {
+		t.Fatalf("with secrets: %v", err)
+	}
+
+	tokenStore := newMemTokenStore()
+	tokenStore.putCode(oidc.AuthCode{
+		Code:        authCode,
+		ClientID:    "tempogate-device-ui",
+		RedirectURI: unreachableIssuer + callbackPath,
+		Email:       email,
+		Scope:       "openid email",
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Minute),
+	})
+
+	// nil signer is safe here: RedeemAuthorizationCode returns the
+	// consumed AuthCode's claims before any token minting, so the signer
+	// is never dereferenced on this code path. The public /token handler
+	// would dereference it via t.issue, which this test does not exercise.
+	token := oidc.NewToken(tokenStore, nil, reg, oidc.WithTokenClock(func() time.Time { return now }))
+
+	bsStore := newMemBrowserSessionStore()
+	sessions := oidc.NewSessionManager(bsStore, signingKey,
+		oidc.WithSessionClock(func() time.Time { return now }),
+		oidc.WithSessionTTL(5*time.Minute),
+		oidc.WithSessionSIDGenerator(func() (string, error) { return "fixed-sid", nil }),
+	)
+
+	devices := newStatefulDeviceCodeStore()
+	devices.put(oidc.DeviceCode{
+		Code:            "fixed-device-code",
+		UserCode:        userCanonical,
+		ClientID:        "tempogate-device",
+		IntervalSeconds: 5,
+		CreatedAt:       now,
+		ExpiresAt:       now.Add(15 * time.Minute),
+	})
+
+	ui, err := oidc.NewDeviceUI(devices, sessions, reg, token, signingKey, unreachableIssuer,
+		oidc.WithDeviceUIClock(func() time.Time { return now }),
+		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return stateNonce, nil }),
+	)
+	if err != nil {
+		t.Fatalf("construct device-ui: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-unreachable-issuer", "0.0.0")))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	state := signedBounceStateWithKey(userCanonical, stateNonce, now.Add(time.Minute).Unix(), signingKey)
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	req, err := http.NewRequest(http.MethodGet, srv.URL+callbackPath+"?code="+authCode+"&state="+url.QueryEscape(state), http.NoBody)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("sso callback request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect on successful in-process redemption; got %d, body: %s",
+			resp.StatusCode, readBody(t, resp))
+	}
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect Location: %v", err)
+	}
+	// The redirect carries the issuer's path prefix ("/idp" here) because
+	// the device-ui mounts under whatever public base path the issuer
+	// advertises — the confirm path is the one this issuer would publish,
+	// not the bare /device/confirm.
+	if loc.Path != "/idp/device/confirm" {
+		t.Fatalf("expected redirect to /idp/device/confirm; got %q", loc.Path)
+	}
+	if got := loc.Query().Get("user_code"); got != userDisplay {
+		t.Fatalf("expected user_code=%q in redirect query; got %q", userDisplay, got)
+	}
+	if got := bsStore.count(); got != 1 {
+		t.Fatalf("expected exactly one browser session minted; got %d", got)
+	}
+	if got := bsStore.only().Email; got != email {
+		t.Fatalf("expected session email=%q; got %q", email, got)
+	}
 }
