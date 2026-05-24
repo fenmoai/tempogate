@@ -47,22 +47,35 @@ Output (token goes to stdout, progress to stderr — `$(tempogate login --device
 captures only the token):
 
 ```
-On a device with a browser, open:
+A login URL has been generated. On any device with a browser, open:
 
-    https://tempogate.example.com/device?user_code=BCDF-GHJK
+  https://tempogate.example.com/device
 
-Or open https://tempogate.example.com/device and enter:
+And enter this code:
 
-    BCDF-GHJK
+  BCDF-GHJK
 
-Waiting for approval (expires in 5m0s, polling every 5s)...
-Signed in. Token saved to /home/you/.tempogate/token.json, valid until 2026-05-24 18:42:00 UTC.
+(or, to skip the manual entry, scan/open:
+  https://tempogate.example.com/device?user_code=BCDF-GHJK )
+
+Waiting for you to approve in your browser…
+Signed in. Token saved to /home/you/.tempogate/token.json, valid until 2026-05-24T18:42:00Z.
 ```
 
 `TEMPOGATE_LOGIN_MODE=device` is equivalent to `--device`, for CI scripts that
 cannot pass flags. After this first login, use `tempogate token` exactly as
 with the loopback flow — same file, same auto-refresh, no further browser
 involvement.
+
+The `verification_uri_complete` line — the shortcut URL with the code
+pre-filled — is shown only if your server publishes one; servers are free to
+omit it (RFC 8628 §3.2 marks it OPTIONAL), in which case the bare
+`verification_uri` and the typed code are your only path. tempogate publishes
+both. `--port` and `--client-id`'s default are repurposed under `--device`:
+the loopback port is ignored, and the default client_id switches from
+`tempogate-cli` to `tempogate-device`. A `--device-poll-deadline` flag caps
+how long the CLI keeps polling — useful in CI to fail fast; without it, the
+CLI follows the issuer's advertised `expires_in`.
 
 ## What happens in your browser
 
@@ -150,9 +163,11 @@ OIDC__SESSION_SIGNING_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
 OIDC__SESSION_TTL=5m   # default; the verification cookie's lifetime
 ```
 
-If `OIDC__SESSION_SIGNING_KEY` is unset, the device flow refuses to start.
-Both keys above (`tempogate-device-ui` secret and `OIDC__SESSION_SIGNING_KEY`)
-must be **stable across rolling restarts** — rotating them invalidates active
+`OIDC__SESSION_SIGNING_KEY` is required at startup — tempogate refuses to
+boot if it is empty, not base64url, or does not decode to exactly 32 bytes
+(the HMAC-SHA256 key length). Both secrets above (`tempogate-device-ui`'s
+entry in `OIDC__CLIENT_SECRETS` and `OIDC__SESSION_SIGNING_KEY`) must be
+**stable across rolling restarts** — rotating them invalidates active
 approval sessions, so users mid-flow will see their verification page expire.
 
 The signed-in email is gated by `OIDC__ALLOWED_DOMAINS`, the same allowlist
@@ -173,10 +188,10 @@ in this release.
   redeemed for a token. Do not paste the JSON response from
   `/device_authorization` into chat.
 * **The verification cookie is tightly scoped.** It is HttpOnly, Secure,
-  `SameSite=Lax`, signed (not encrypted), path-scoped to `/device*`, and has
-  the TTL set by `OIDC__SESSION_TTL` (default 5m). It is *not* a
-  general-purpose tempogate login session — the only thing it authorizes is
-  approving or denying a pending device flow.
+  `SameSite=Lax`, signed (not encrypted), path-scoped to the device-flow
+  verification UI, and has the TTL set by `OIDC__SESSION_TTL` (default 5m).
+  It is *not* a general-purpose tempogate login session — the only thing it
+  authorizes is approving or denying a pending device flow.
 * **The minted token is identical to a loopback token.** Same lifetime,
   same `permissions` claim, same `aud`, same JWKS-verified signature. The
   device flow changes *how* the human authenticates the CLI, not what the
