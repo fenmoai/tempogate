@@ -55,7 +55,43 @@ const (
 	cliClientID    = "tempogate-cli"
 	cliTokenFile   = "/tmp/tg-token.json"
 	cliAuthURLFile = "/tmp/tempogate-authurl"
+
+	// e2eSessionSigningKeyB64 is "0123456789abcdef0123456789abcdef" — 32 ASCII
+	// bytes, base64url-encoded without padding — the length the oidc fx graph
+	// requires for OIDC__SESSION_SIGNING_KEY. Stable across runs so the
+	// deployment is reproducible; the key is shared by every e2e setupCLIStack
+	// caller (loopback + device-flow). It only protects the intra-cluster
+	// verification-UI bounce, so a public test literal is fine.
+	e2eSessionSigningKeyB64 = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
 )
+
+// addDeviceUIServerEnv layers onto an existing tempogate e2e env map the
+// OIDC__* keys the server's fx graph has required since the device-flow
+// verification UI's signed-cookie session work landed: the signing key,
+// the internal `tempogate-device-ui` client (registered with a confidential
+// secret), and its callback under callbackIssuer. Existing OIDC__CLIENTS /
+// OIDC__CLIENT_SECRETS entries are preserved — the device-ui registration
+// is appended — so harnesses that already register their own clients
+// (loopback CLI, temporal-ui SSO, noop admin tests) keep working unchanged.
+// callbackIssuer is the issuer URL the device-ui callback hangs off of
+// (typically `tempogateIssuer`; for the path-prefixed test, the prefixed
+// form so the registered redirect matches what the handler builds).
+func addDeviceUIServerEnv(env map[string]string, callbackIssuer string) {
+	deviceUIRegistration := deviceUIClientID + ":" + callbackIssuer + "/device/sso-callback"
+	if existing := env["OIDC__CLIENTS"]; existing != "" {
+		env["OIDC__CLIENTS"] = existing + "," + deviceUIRegistration
+	} else {
+		env["OIDC__CLIENTS"] = deviceUIRegistration
+	}
+	deviceUISecretEntry := deviceUIClientID + ":" + deviceUIClientSecret
+	if existing := env["OIDC__CLIENT_SECRETS"]; existing != "" {
+		env["OIDC__CLIENT_SECRETS"] = existing + "," + deviceUISecretEntry
+	} else {
+		env["OIDC__CLIENT_SECRETS"] = deviceUISecretEntry
+	}
+	env["OIDC__SESSION_SIGNING_KEY"] = e2eSessionSigningKeyB64
+	env["OIDC__SESSION_TTL"] = "5m"
+}
 
 // jwtPattern matches a compact JWS (three base64url segments) so the token a
 // subcommand prints can be lifted out of multiplexed exec output regardless of
@@ -63,10 +99,11 @@ const (
 var jwtPattern = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
 
 type cliStack struct {
-	mockBaseURL  string
-	frontendAddr string
-	client       testcontainers.Container
-	chromeWS     string
+	mockBaseURL      string // mapped http://host:port for mockgoogle
+	tempogateBaseURL string // mapped http://host:port for tempogate
+	frontendAddr     string
+	client           testcontainers.Container
+	chromeWS         string
 }
 
 func TestCLILogin(t *testing.T) {
@@ -259,7 +296,12 @@ func (s *cliStack) runToken(ctx context.Context, t *testing.T) string {
 
 // ---------- stack bring-up ----------
 
-func setupCLIStack(ctx context.Context, t *testing.T) *cliStack {
+// setupCLIStack brings up tempogate + mockgoogle + temporal + cliclient (the
+// shared headless-Chrome + tempogate-binary container). extraTempogateEnv is
+// merged onto the base OIDC__* config so the device-flow acceptance proof can
+// register its extra client_ids + signing key without forcing the loopback
+// proof to carry inert config.
+func setupCLIStack(ctx context.Context, t *testing.T, extraTempogateEnv ...map[string]string) *cliStack {
 	t.Helper()
 	root := repoRoot(t)
 
@@ -289,18 +331,27 @@ func setupCLIStack(ctx context.Context, t *testing.T) *cliStack {
 
 	// --- tempogate: migrate then serve. The CLI is registered as a *public*
 	// client (no secret ⇒ PKCE mandatory) with a 127.0.0.1: redirect prefix,
-	// so any ephemeral loopback port is accepted.
+	// so any ephemeral loopback port is accepted. The device-flow CLI
+	// (tempogate-device) goes in too so TestCLIDeviceLogin can reuse this
+	// stack; addDeviceUIServerEnv adds the verification-UI's internal
+	// client + session signing key the server fx graph requires.
 	tgEnv := map[string]string{
 		"HTTP__LISTENER":               "0.0.0.0:8000",
 		"STATE__SQLITE__PATH":          "/state/state.db",
 		"OIDC__ISSUER":                 tempogateIssuer,
-		"OIDC__CLIENTS":                cliClientID + ":http://127.0.0.1:",
+		"OIDC__CLIENTS":                cliClientID + ":http://127.0.0.1:," + deviceClientID + ":cli",
 		"OIDC__ALLOWED_DOMAINS":        "example.com",
 		"OIDC__GOOGLE__CLIENT_ID":      "tempogate-upstream",
 		"OIDC__GOOGLE__CLIENT_SECRET":  "tempogate-upstream-secret",
 		"OIDC__GOOGLE__AUTH_ENDPOINT":  mockIssuer + "/auth",
 		"OIDC__GOOGLE__TOKEN_ENDPOINT": mockIssuer + "/token",
 		"OIDC__GOOGLE__ISSUER_URL":     mockIssuer,
+	}
+	addDeviceUIServerEnv(tgEnv, tempogateIssuer)
+	for _, m := range extraTempogateEnv {
+		for k, v := range m {
+			tgEnv[k] = v
+		}
 	}
 	stateVol := fmt.Sprintf("tempogate-cli-e2e-state-%d", time.Now().UnixNano())
 	tgImg, tgFrom := builtImageSource("E2E_TEMPOGATE_IMAGE", "Dockerfile", root)
@@ -384,14 +435,19 @@ func setupCLIStack(ctx context.Context, t *testing.T) *cliStack {
 	// --- cliclient: headless Chrome + the tempogate binary in one container,
 	// so the loopback server and the browser share a network namespace.
 	cliImg, cliFrom := builtImageSource("E2E_CLICLIENT_IMAGE", "test/e2e/cliclient/Dockerfile", root)
+	// The headless-shell base image's run.sh already pins
+	// --remote-debugging-address=0.0.0.0 --remote-debugging-port=9223 and
+	// runs socat to forward host-mapped 9222 → internal 9223; redefining
+	// those here as the container Cmd appends a *second*
+	// --remote-debugging-port=9222 in chrome 148+'s run.sh ($@), which
+	// either makes chrome bind both ports or crash on startup. Leaving Cmd
+	// empty defers to run.sh's defaults; --disable-dev-shm-usage isn't
+	// needed because shared docker-shm crashes only matter to chrome's
+	// renderer process under heavy DOM trees, which this test never has.
 	clientC, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:          cliImg,
 			FromDockerfile: cliFrom,
-			Cmd: []string{
-				"--remote-debugging-address=0.0.0.0", "--remote-debugging-port=9222",
-				"--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-			},
 			ExposedPorts:   []string{"9222/tcp"},
 			Networks:       []string{netName},
 			NetworkAliases: alias("cliclient"),
@@ -404,9 +460,10 @@ func setupCLIStack(ctx context.Context, t *testing.T) *cliStack {
 	track(ctx, t, "cliclient", clientC)
 
 	return &cliStack{
-		mockBaseURL:  mockBase,
-		frontendAddr: mappedAddr(ctx, t, temporal, "7233"),
-		client:       clientC,
-		chromeWS:     devtoolsWS(ctx, t, clientC),
+		mockBaseURL:      mockBase,
+		tempogateBaseURL: mappedHTTP(ctx, t, tempogate, "8000"),
+		frontendAddr:     mappedAddr(ctx, t, temporal, "7233"),
+		client:           clientC,
+		chromeWS:         devtoolsWS(ctx, t, clientC),
 	}
 }

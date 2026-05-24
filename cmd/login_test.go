@@ -298,3 +298,78 @@ func (s *DeviceLoginDispatchSuite) TestDefaultDeviceRunnerDelegatesToDeviceFlow(
 	s.Require().Error(err)
 	s.Contains(err.Error(), "issuer is required")
 }
+
+// TestDevicePollDeadlineFlagAppendsOption asserts the new
+// --device-poll-deadline flag actually adds a DeviceOption when set (and
+// omits one when left at its zero value, so the default 15-minute
+// expires_in path keeps working for laptop users). The runner stub captures
+// the options list because counting it is enough to prove the wiring — the
+// option's effect is covered by cli's own DeviceFlow tests.
+func (s *DeviceLoginDispatchSuite) TestDevicePollDeadlineFlagAppendsOption() {
+	s.T().Setenv("TEMPOGATE__ISSUER", "https://tempogate.example.com")
+
+	cases := []struct {
+		name    string
+		args    []string
+		wantLen int
+	}{
+		{
+			name:    "flag set appends WithDevicePollDeadline",
+			args:    []string{"--device", "--device-poll-deadline", "7s"},
+			wantLen: 4, // issuer + client-id + output + poll-deadline
+		},
+		{
+			name:    "flag unset omits WithDevicePollDeadline",
+			args:    []string{"--device"},
+			wantLen: 3, // issuer + client-id + output only
+		},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			var capturedLen int
+			deviceRunner = func(_ context.Context, opts ...cli.DeviceOption) (cli.Token, error) {
+				capturedLen = len(opts)
+				return cli.Token{AccessToken: "device-token"}, nil
+			}
+
+			var out, errOut bytes.Buffer
+			cmd := newLoginCmd(zap.NewNop())
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			cmd.SetArgs(append(tc.args, "--token-file", filepath.Join(s.T().TempDir(), "t.json")))
+
+			s.Require().NoError(cmd.ExecuteContext(context.Background()))
+			s.Equal(tc.wantLen, capturedLen)
+		})
+	}
+}
+
+// TestDevicePollDeadlineRejectsNegative asserts a negative duration is
+// surfaced as a clear validation error rather than silently treated like
+// the unset default — a user passing --device-poll-deadline=-5s would
+// otherwise see the full issuer expires_in time out before figuring out
+// their flag was ignored.
+func (s *DeviceLoginDispatchSuite) TestDevicePollDeadlineRejectsNegative() {
+	s.T().Setenv("TEMPOGATE__ISSUER", "https://tempogate.example.com")
+	deviceRunner = func(_ context.Context, _ ...cli.DeviceOption) (cli.Token, error) {
+		s.FailNow("deviceRunner must not run when the flag fails validation")
+		return cli.Token{}, nil
+	}
+
+	cmd := newLoginCmd(zap.NewNop())
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(new(testWriter))
+	cmd.SetErr(new(testWriter))
+	cmd.SetArgs([]string{
+		"--device", "--device-poll-deadline", "-5s",
+		"--token-file", filepath.Join(s.T().TempDir(), "t.json"),
+	})
+
+	err := cmd.ExecuteContext(context.Background())
+	s.Require().Error(err)
+	s.Contains(err.Error(), "--device-poll-deadline must be non-negative")
+}

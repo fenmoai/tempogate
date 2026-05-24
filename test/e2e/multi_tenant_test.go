@@ -315,6 +315,7 @@ func setupMultiTenantStack(ctx context.Context, t *testing.T) *multiTenantStack 
 		"OIDC__GOOGLE__TOKEN_ENDPOINT": "http://unused.invalid/token",
 		"OIDC__GOOGLE__ISSUER_URL":     "http://unused.invalid",
 	}
+	addDeviceUIServerEnv(tgEnv, tempogateIssuer)
 	stateVol := fmt.Sprintf("tempogate-multitenant-e2e-state-%d", time.Now().UnixNano())
 	tgImg, tgFrom := builtImageSource("E2E_TEMPOGATE_IMAGE", "Dockerfile", root)
 

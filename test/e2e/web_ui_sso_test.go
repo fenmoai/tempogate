@@ -192,6 +192,11 @@ func setupStack(ctx context.Context, t *testing.T) *stack {
 		"OIDC__GOOGLE__TOKEN_ENDPOINT": mockIssuer + "/token",
 		"OIDC__GOOGLE__ISSUER_URL":     mockIssuer,
 	}
+	// The temporal-UI SSO surface this test exercises doesn't touch the
+	// device flow, but the server fx graph now requires the verification
+	// UI's internal client + signing key regardless — addDeviceUIServerEnv
+	// appends them.
+	addDeviceUIServerEnv(tgEnv, tempogateIssuer)
 	stateVol := fmt.Sprintf("tempogate-e2e-state-%d", time.Now().UnixNano())
 	tgImg, tgFrom := builtImageSource("E2E_TEMPOGATE_IMAGE", "Dockerfile", root)
 
