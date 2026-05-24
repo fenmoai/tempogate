@@ -171,8 +171,9 @@ type deviceUIParams struct {
 	Sessions *SessionManager
 	Clients  ClientRegistry
 
-	Issuer        string `name:"oidc_issuer"`
-	SigningKeyB64 string `name:"oidc_session_signing_key"`
+	Issuer             string `name:"oidc_issuer"`
+	SigningKeyB64      string `name:"oidc_session_signing_key"`
+	GoogleAuthEndpoint string `name:"google_auth_endpoint"`
 }
 
 // newDeviceUIRegistrar builds the verification-UI surface. The internal
@@ -192,7 +193,14 @@ func newDeviceUIRegistrar(p deviceUIParams) (func(huma.API), error) {
 	if len(key) != sessionSigningKeyBytes {
 		return nil, fmt.Errorf("oidc: OIDC__SESSION_SIGNING_KEY must decode to %d bytes, got %d", sessionSigningKeyBytes, len(key))
 	}
-	ui, err := NewDeviceUI(p.Devices, p.Sessions, p.Clients, key, p.Issuer)
+	ui, err := NewDeviceUI(p.Devices, p.Sessions, p.Clients, key, p.Issuer,
+		// Whitelist the upstream IdP's origin in the device_enter page's CSP
+		// form-action directive. CSP3 checks form-action across the redirect
+		// chain (POST /device → 303 /authorize → 302 upstream), so the
+		// cross-origin hop is silently dropped by the browser unless this
+		// source is present.
+		WithUpstreamIDPOrigin(p.GoogleAuthEndpoint),
+	)
 	if err != nil {
 		return nil, err
 	}

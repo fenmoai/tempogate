@@ -92,6 +92,13 @@ var ErrInternalDeviceUIClientMissing = errors.New("oidc: internal device-ui clie
 // registration would silently break the round-trip.
 var ErrInternalDeviceUIClientNotConfidential = errors.New("oidc: internal device-ui client must be confidential (set its secret in OIDC__CLIENT_SECRETS)")
 
+// ErrInvalidUpstreamIDPOrigin is returned by NewDeviceUI when a non-empty
+// upstream IdP authorization endpoint URL fails to parse into a CSP form-
+// action source (scheme + host). An empty value is permitted — it just
+// keeps form-action at 'self', which is correct for deployments whose
+// upstream IdP shares the issuer's origin.
+var ErrInvalidUpstreamIDPOrigin = errors.New("oidc: upstream IdP authorization endpoint must be an absolute URL with scheme and host")
+
 // DeviceUI serves the human-side of the RFC 8628 §3.3 verification flow:
 // the user_code entry form, the SSO bounce through tempogate's own
 // /idp/authorize chain (acting as the internal tempogate-device-ui client),
@@ -110,6 +117,16 @@ type DeviceUI struct {
 	now                  func() time.Time
 	newStateNonce        func() (string, error)
 	pages                map[string]*template.Template
+
+	// rawUpstreamIDPAuthEndpoint is captured by WithUpstreamIDPOrigin and
+	// parsed once in NewDeviceUI; the result lives in upstreamFormActionSource.
+	rawUpstreamIDPAuthEndpoint string
+
+	// upstreamFormActionSource is the "scheme://host[:port]" origin of the
+	// upstream IdP's authorization endpoint, used as an extra source in the
+	// device_enter page's CSP form-action directive. Empty when the operator
+	// hasn't wired an origin (e.g., tests whose mock IdP shares the issuer).
+	upstreamFormActionSource string
 }
 
 // DeviceUIOption configures a DeviceUI at construction. Every seam a test
@@ -149,6 +166,22 @@ func WithInternalTokenURL(rawURL string) DeviceUIOption {
 // call is loopback; tests may inject a client with a custom transport.
 func WithDeviceUIHTTPClient(c *http.Client) DeviceUIOption {
 	return func(u *DeviceUI) { u.httpClient = c }
+}
+
+// WithUpstreamIDPOrigin lets the device_enter page emit a CSP form-action
+// directive that whitelists the upstream IdP's origin in addition to 'self'.
+// CSP Level 3 enforces form-action across every URL in the navigation chain
+// that a form submission produces (the 303 to /authorize plus the 302 to
+// the upstream IdP), so a cross-origin upstream silently breaks the device
+// flow unless its origin is in the source list.
+//
+// rawAuthEndpoint is the same value that wires the Authorizer's upstream
+// endpoint (OIDC__GOOGLE__AUTH_ENDPOINT) — pass it verbatim, the constructor
+// extracts scheme + host. An empty value leaves the directive at 'self',
+// which is correct only when the upstream IdP shares the issuer's origin
+// (typically integration tests with an in-process mock).
+func WithUpstreamIDPOrigin(rawAuthEndpoint string) DeviceUIOption {
+	return func(u *DeviceUI) { u.rawUpstreamIDPAuthEndpoint = rawAuthEndpoint }
 }
 
 // NewDeviceUI constructs the device-flow verification UI handler. signingKey
@@ -195,6 +228,14 @@ func NewDeviceUI(
 	}
 	u.internalClientSecret = client.Secret
 
+	if u.rawUpstreamIDPAuthEndpoint != "" {
+		source, err := upstreamFormActionSource(u.rawUpstreamIDPAuthEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %q: %s", ErrInvalidUpstreamIDPOrigin, u.rawUpstreamIDPAuthEndpoint, err)
+		}
+		u.upstreamFormActionSource = source
+	}
+
 	pages, err := loadDevicePages()
 	if err != nil {
 		return nil, fmt.Errorf("oidc: load device-ui templates: %w", err)
@@ -202,6 +243,27 @@ func NewDeviceUI(
 	u.pages = pages
 
 	return u, nil
+}
+
+// upstreamFormActionSource collapses an upstream IdP authorization-endpoint
+// URL down to the CSP source it contributes: "scheme://host[:port]". CSP3
+// §2.3.1 source expressions accept exactly that shape; a path or query on
+// the endpoint URL is irrelevant to the form-action match and would in fact
+// make the directive a no-op against the upstream IdP's own authorization
+// URL (which carries its own query string).
+func upstreamFormActionSource(rawAuthEndpoint string) (string, error) {
+	parsed, err := url.Parse(rawAuthEndpoint)
+	if err != nil {
+		return "", err
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return "", fmt.Errorf("scheme must be http or https, got %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return "", errors.New("missing host")
+	}
+	return scheme + "://" + parsed.Host, nil
 }
 
 func loadDevicePages() (map[string]*template.Template, error) {
@@ -350,8 +412,9 @@ type deviceDecisionInput struct {
 // display form so the user sees what they typed on the device.
 func (u *DeviceUI) handleEnterGet(_ context.Context, in *deviceEnterGetInput) (*htmlOutput, error) {
 	body, err := u.render("enter", map[string]any{
-		"PostURL":           u.publicPath(DevicePath),
-		"PrefilledUserCode": formatUserCode(canonicalUserCode(in.UserCode)),
+		"PostURL":                  u.publicPath(DevicePath),
+		"PrefilledUserCode":        formatUserCode(canonicalUserCode(in.UserCode)),
+		"UpstreamFormActionSource": u.upstreamFormActionSource,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("oidc: device-ui enter render: %w", err)

@@ -105,9 +105,17 @@ func (s *DeviceUIIntegrationSuite) SetupTest() {
 	srv := httptest.NewUnstartedServer(nil)
 	tokenURL := "https://" + srv.Listener.Addr().String() + "/token"
 
+	// The mock upstream IdP runs on a separate httptest.NewServer (plain
+	// http on 127.0.0.1) from the tempogate test server (TLS on a different
+	// port) — i.e., a different origin from the issuer. This is the same
+	// cross-origin shape every production Google deployment has, and is
+	// what triggers the CSP form-action regression. Wiring the upstream
+	// auth endpoint here so the device_enter page's CSP whitelists that
+	// origin is what lets the post-submit redirect chain reach the IdP.
 	deviceUI, err := oidc.NewDeviceUI(store, sessions, reg, s.signKey, s.issuer,
 		oidc.WithInternalTokenURL(tokenURL),
 		oidc.WithDeviceUIHTTPClient(insecureTLSClient()),
+		oidc.WithUpstreamIDPOrigin(s.mg.issuer()+"/auth"),
 	)
 	s.Require().NoError(err)
 
@@ -319,6 +327,33 @@ func (s *DeviceUIIntegrationSuite) TestDenyFlipsRowAndDeviceCodePollSeesAccessDe
 	}
 	s.Require().NoError(json.NewDecoder(pollResp.Body).Decode(&oauthErr))
 	s.Equal("access_denied", oauthErr.Error)
+}
+
+// TestEnterPageCSPAllowsCrossOriginUpstreamIDP is the regression guard
+// for the CSP3 form-action footgun: the verification page must include
+// the upstream IdP's origin in its form-action source list, because the
+// directive is enforced across every URL in the redirect chain a form
+// submission produces (POST /device → 303 /authorize → 302 upstream).
+// Without this source, a real browser silently refuses the cross-origin
+// hop and the device flow stalls on the entry form. Go's http.Client
+// does not enforce CSP, so the prior end-to-end happy-path tests do not
+// catch the regression on their own — this test asserts the directive's
+// rendered shape directly.
+func (s *DeviceUIIntegrationSuite) TestEnterPageCSPAllowsCrossOriginUpstreamIDP() {
+	upstreamOrigin, err := url.Parse(s.mg.issuer())
+	s.Require().NoError(err)
+	wantSource := upstreamOrigin.Scheme + "://" + upstreamOrigin.Host
+	s.Require().NotEqual(s.issuer, wantSource,
+		"sanity: mock IdP must be on a different origin from the issuer for this test to be meaningful")
+
+	resp, err := s.browser.Get(s.srv.URL + "/device")
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+
+	body := readBody(s.T(), resp)
+	s.Contains(body, "form-action 'self' "+wantSource+";",
+		"the entry page CSP must whitelist the upstream IdP's origin in its form-action directive")
 }
 
 // driveThroughConfirm walks GET /device → POST /device → /authorize →
