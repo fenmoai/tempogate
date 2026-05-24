@@ -158,6 +158,29 @@ oidc:
   # regardless, so the probe paths below need no change.
   issuer: ""
 
+  # OIDC__SESSION_SIGNING_KEY — base64url-encoded 32-byte HMAC key.
+  # Signs the verification-page session cookie and the SSO-bounce `state`
+  # used by the device-authorization flow (RFC 8628), see
+  # docs/cli-device-login.md. The `tempogate serve` Deployment REFUSES
+  # TO BOOT if this is empty, not base64url, or does not decode to
+  # exactly 32 bytes — set this before upgrading or the Deployment will
+  # crash-loop (the migrate Job constructs only the SQLite store and is
+  # unaffected). Supply it via an existing Secret you create out of
+  # band; generate the value once with:
+  #   openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+  # The key MUST stay stable across rolling restarts: rotating it
+  # invalidates every active approval session.
+  sessionSigningKeySecretRef:
+    name: ""
+    key: ""
+
+  # OIDC__SESSION_TTL — TTL of the verification-page session cookie used
+  # by the device-authorization flow. Go duration. Empty leaves the
+  # tempogate binary's built-in default (5m). The cookie is scoped to
+  # the device-flow UI only — not a general-purpose login session — so
+  # short values bound how long an approval window can stay open.
+  sessionTtl: ""
+
 auth:
   # Comma-separated `id:redirect_uri_prefix` client allowlist
   # (OIDC__CLIENTS). Non-secret.

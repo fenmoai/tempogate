@@ -113,6 +113,15 @@ non-secret vars come from the ConfigMap via envFrom (see each workload).
       key: {{ required "auth.clientSecretsSecretRef.key is required when .name is set" .key }}
 {{- end }}
 {{- end }}
+{{- with .Values.oidc.sessionSigningKeySecretRef }}
+{{- if .name }}
+- name: OIDC__SESSION_SIGNING_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .name }}
+      key: {{ required "oidc.sessionSigningKeySecretRef.key is required when .name is set" .key }}
+{{- end }}
+{{- end }}
 {{- with .Values.extraEnv }}
 {{- toYaml . | nindent 0 }}
 {{- end }}
