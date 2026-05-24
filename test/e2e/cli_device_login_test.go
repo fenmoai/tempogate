@@ -144,8 +144,8 @@ func TestCLIDeviceLogin(t *testing.T) {
 				// User reaches the confirm page, reads the code, decides not to
 				// approve. RFC 8628 §3.5 access_denied; cli surfaces it as
 				// ErrUserDenied = "user denied the device authorization".
-				name:             "user clicks Deny on the confirm page",
-				extraFlags:       []string{"--device-poll-deadline", "2m"},
+				name:       "user clicks Deny on the confirm page",
+				extraFlags: []string{"--device-poll-deadline", "2m"},
 				drive: func(ctx context.Context, t *testing.T, s *cliStack, userCode string) {
 					s.driveDeviceDecision(ctx, t, userCode, "deny")
 				},

@@ -346,3 +346,30 @@ func (s *DeviceLoginDispatchSuite) TestDevicePollDeadlineFlagAppendsOption() {
 		})
 	}
 }
+
+// TestDevicePollDeadlineRejectsNegative asserts a negative duration is
+// surfaced as a clear validation error rather than silently treated like
+// the unset default — a user passing --device-poll-deadline=-5s would
+// otherwise see the full issuer expires_in time out before figuring out
+// their flag was ignored.
+func (s *DeviceLoginDispatchSuite) TestDevicePollDeadlineRejectsNegative() {
+	s.T().Setenv("TEMPOGATE__ISSUER", "https://tempogate.example.com")
+	deviceRunner = func(_ context.Context, _ ...cli.DeviceOption) (cli.Token, error) {
+		s.FailNow("deviceRunner must not run when the flag fails validation")
+		return cli.Token{}, nil
+	}
+
+	cmd := newLoginCmd(zap.NewNop())
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(new(testWriter))
+	cmd.SetErr(new(testWriter))
+	cmd.SetArgs([]string{
+		"--device", "--device-poll-deadline", "-5s",
+		"--token-file", filepath.Join(s.T().TempDir(), "t.json"),
+	})
+
+	err := cmd.ExecuteContext(context.Background())
+	s.Require().Error(err)
+	s.Contains(err.Error(), "--device-poll-deadline must be non-negative")
+}

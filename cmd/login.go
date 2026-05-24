@@ -102,6 +102,9 @@ func newLoginCmd(logger *zap.Logger) *cobra.Command {
 
 			var tok cli.Token
 			if useDevice {
+				if devicePollDeadline < 0 {
+					return fmt.Errorf("--device-poll-deadline must be non-negative, got %s", devicePollDeadline)
+				}
 				log.Info("starting device-flow login", zap.String("issuer", issuer))
 				opts := []cli.DeviceOption{
 					cli.WithDeviceIssuer(issuer),
