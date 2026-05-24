@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -63,6 +64,12 @@ const (
 	// two concurrent device flows can never produce identical signed states
 	// (the HMAC alone would collide for identical {user_code, exp} pairs).
 	deviceStateNonceBytes = 16
+
+	// logOpSSOCallback is the "op" attribute on every structured log line
+	// the SSO callback emits. Stable on purpose so an operator can grep or
+	// build a dashboard panel on it without re-deriving the string from
+	// log content.
+	logOpSSOCallback = "device.sso_callback"
 )
 
 //go:embed templates/*.html
@@ -127,6 +134,14 @@ type DeviceUI struct {
 	// device_enter page's CSP form-action directive. Empty when the operator
 	// hasn't wired an origin (e.g., tests whose mock IdP shares the issuer).
 	upstreamFormActionSource string
+
+	// logger is the operator-facing structured log sink. Every failure path
+	// that the SSO callback collapses into the generic "could not be
+	// completed" error page writes one line through this so the cause is
+	// recoverable from `kubectl logs` instead of being silently discarded.
+	// Defaults to slog.New(slog.DiscardHandler) in NewDeviceUI so tests and
+	// direct constructors that don't wire one in produce no noise.
+	logger *slog.Logger
 }
 
 // DeviceUIOption configures a DeviceUI at construction. Every seam a test
@@ -166,6 +181,16 @@ func WithInternalTokenURL(rawURL string) DeviceUIOption {
 // call is loopback; tests may inject a client with a custom transport.
 func WithDeviceUIHTTPClient(c *http.Client) DeviceUIOption {
 	return func(u *DeviceUI) { u.httpClient = c }
+}
+
+// WithDeviceUILogger threads the operator-facing structured log sink into
+// the verification UI. Wire it in production so every failure path that
+// renders the generic "could not be completed" page leaves a recoverable
+// trace in `kubectl logs`. Defaults to slog.New(slog.DiscardHandler) in
+// NewDeviceUI when omitted, which keeps tests and direct constructors
+// quiet without forcing every caller to know about the logger.
+func WithDeviceUILogger(l *slog.Logger) DeviceUIOption {
+	return func(u *DeviceUI) { u.logger = l }
 }
 
 // WithUpstreamIDPOrigin lets the device_enter page emit a CSP form-action
@@ -217,6 +242,9 @@ func NewDeviceUI(
 	}
 	if u.tokenURL == "" {
 		u.tokenURL = trimmedIssuer + TokenPath
+	}
+	if u.logger == nil {
+		u.logger = slog.New(slog.DiscardHandler)
 	}
 
 	client, ok := clients[u.internalClientID]
@@ -484,16 +512,48 @@ func (u *DeviceUI) handleEnterPost(ctx context.Context, in *deviceEnterPostInput
 // 303 so the browser's next GET to /confirm presents the session.
 func (u *DeviceUI) handleSSOCallback(ctx context.Context, in *deviceSSOCallbackInput) (*deviceRedirectOrPage, error) {
 	if in.Code == "" || in.State == "" {
+		// Warn rather than Error: an empty code or state usually means the
+		// upstream IdP sent a malformed callback (rare misconfiguration of
+		// the upstream client, or a direct hit on the URL without the
+		// preceding bounce). Booleans only — neither value carries
+		// recoverable secret material, but the actual contents add nothing
+		// to the diagnosis either.
+		u.logger.WarnContext(ctx, "device-ui sso callback rejected: missing code or state",
+			"op", logOpSSOCallback,
+			"cause", "missing_code_or_state",
+			"code_present", in.Code != "",
+			"state_present", in.State != "",
+		)
 		return u.errorPage("That sign-in could not be completed. Restart the sign-in from your device."), nil
 	}
 
 	userCode, err := u.verifyBounceState(in.State)
 	if err != nil {
+		// Warn: the most common cause is a slow user round-trip that
+		// crossed the 10-minute state TTL, or a rolling restart that
+		// landed the callback on a pod with a freshly rotated signing
+		// key. Both are recoverable by the user re-running the device
+		// flow, but the operator wants to see the rate.
+		u.logger.WarnContext(ctx, "device-ui sso callback rejected: bounce state verification failed",
+			"op", logOpSSOCallback,
+			"cause", "verify_bounce_state",
+			"err", err,
+		)
 		return u.errorPage("That sign-in could not be completed. Restart the sign-in from your device."), nil
 	}
 
 	email, err := u.redeemAuthCode(ctx, in.Code)
 	if err != nil {
+		// Error: the loopback /token call is supposed to succeed
+		// unconditionally once the upstream bounce completes — so any
+		// failure here is an integration issue (wrong client secret,
+		// loopback URL unreachable, malformed id_token, /token returning
+		// a non-200 we don't recognise). Operator must investigate.
+		u.logger.ErrorContext(ctx, "device-ui sso callback failed: auth code redemption failed",
+			"op", logOpSSOCallback,
+			"cause", "redeem_auth_code",
+			"err", err,
+		)
 		return u.errorPage("That sign-in could not be completed. Restart the sign-in from your device."), nil
 	}
 

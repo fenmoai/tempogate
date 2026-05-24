@@ -1,6 +1,7 @@
 package oidc_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"hash"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -499,6 +501,139 @@ func (s *DeviceUISuite) TestSSOCallbackTokenFailureRendersError() {
 	body := readBody(s.T(), resp)
 	s.Contains(body, "could not be completed")
 	s.Zero(s.bsStore.count(), "no session must be minted when /token redemption fails")
+}
+
+// TestSSOCallbackLogsRedeemAuthCodeFailure pins the operator-visible
+// log shape for the most common SSO callback failure mode: the loopback
+// /token call returning a non-200. Without a structured log line here
+// the deployment is undiagnosable from `kubectl logs` — see FEN-1174 for
+// the broader observability work this seeds.
+func (s *DeviceUISuite) TestSSOCallbackLogsRedeemAuthCodeFailure() {
+	var buf bytes.Buffer
+	ui, srv := s.deviceUIWithLogger(&buf, http.StatusBadRequest)
+	defer srv.Close()
+	_ = ui
+
+	state := s.signedBounceState(deviceUITestUserCanonical, deviceUITestStateNonce, deviceUINow.Add(time.Minute).Unix())
+	resp, err := s.client.Get(srv.URL + "/device/sso-callback?code=secret-auth-code&state=" + url.QueryEscape(state))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+
+	line := decodeSingleLogLine(s.T(), buf.Bytes())
+	s.Equal("ERROR", line["level"], "loopback /token failure is an integration error, not a user error")
+	s.Equal("device.sso_callback", line["op"])
+	s.Equal("redeem_auth_code", line["cause"])
+	s.NotEmpty(line["err"], "the underlying error message must reach the operator")
+	assertNoSecretLeak(s.T(), buf.Bytes(), []string{"secret-auth-code", deviceUITestStateNonce, deviceUITestSID})
+}
+
+// TestSSOCallbackLogsBounceStateVerificationFailure covers the second
+// swallowed-error site: a state that decodes but doesn't verify (key
+// rotation, expired exp, tampered MAC). Warn-level — recoverable by the
+// user re-running the device flow but the rate is operator-relevant.
+func (s *DeviceUISuite) TestSSOCallbackLogsBounceStateVerificationFailure() {
+	var buf bytes.Buffer
+	ui, srv := s.deviceUIWithLogger(&buf, http.StatusOK)
+	defer srv.Close()
+	_ = ui
+
+	resp, err := s.client.Get(srv.URL + "/device/sso-callback?code=auth-code&state=garbage-but-non-empty")
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+
+	line := decodeSingleLogLine(s.T(), buf.Bytes())
+	s.Equal("WARN", line["level"])
+	s.Equal("device.sso_callback", line["op"])
+	s.Equal("verify_bounce_state", line["cause"])
+	s.NotEmpty(line["err"])
+}
+
+// TestSSOCallbackLogsMissingCodeOrState covers the third swallowed-error
+// site: a callback hit directly or by a misconfigured upstream client,
+// without one of the two required query parameters. Booleans only —
+// neither value carries useful content here.
+func (s *DeviceUISuite) TestSSOCallbackLogsMissingCodeOrState() {
+	var buf bytes.Buffer
+	ui, srv := s.deviceUIWithLogger(&buf, http.StatusOK)
+	defer srv.Close()
+	_ = ui
+
+	resp, err := s.client.Get(srv.URL + "/device/sso-callback?state=anything")
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+
+	line := decodeSingleLogLine(s.T(), buf.Bytes())
+	s.Equal("WARN", line["level"])
+	s.Equal("device.sso_callback", line["op"])
+	s.Equal("missing_code_or_state", line["cause"])
+	s.Equal(false, line["code_present"], "code was absent in the URL")
+	s.Equal(true, line["state_present"], "state was present in the URL")
+}
+
+// deviceUIWithLogger spins up a fresh DeviceUI + httptest server wired
+// with a buffer-backed slog logger so each test owns its log output and
+// asserts on it in isolation. tokenStatus controls the fake /token
+// server's HTTP response — pass http.StatusOK for tests whose failure
+// is upstream of redeemAuthCode, http.StatusBadRequest (or any non-200)
+// to trigger the redeem failure path.
+func (s *DeviceUISuite) deviceUIWithLogger(buf *bytes.Buffer, tokenStatus int) (*oidc.DeviceUI, *httptest.Server) {
+	tokenSrv := newFakeTokenServer(deviceUITestEmail)
+	tokenSrv.mu.Lock()
+	tokenSrv.status = tokenStatus
+	tokenSrv.mu.Unlock()
+	s.T().Cleanup(tokenSrv.Close)
+
+	logger := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ui, err := oidc.NewDeviceUI(s.store, s.sessions, s.clients, s.key, testIssuer,
+		oidc.WithDeviceUIClock(func() time.Time { return deviceUINow }),
+		oidc.WithDeviceUIStateNonceGenerator(func() (string, error) { return deviceUITestStateNonce, nil }),
+		oidc.WithInternalTokenURL(tokenSrv.srv.URL),
+		oidc.WithDeviceUILogger(logger),
+	)
+	s.Require().NoError(err)
+
+	mux := http.NewServeMux()
+	ui.Register(humago.New(mux, huma.DefaultConfig("device-ui-log-test", "0.0.0")))
+	return ui, httptest.NewServer(mux)
+}
+
+// decodeSingleLogLine reads exactly one JSON log line from buf and returns
+// it as a map. Tests assert one observable line per failure path; multiple
+// lines (or none) means the handler emitted the wrong number of records
+// and the test should fail loudly rather than silently inspect the first.
+func decodeSingleLogLine(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	trimmed := bytes.TrimRight(raw, "\n")
+	if len(trimmed) == 0 {
+		t.Fatalf("expected one log line, got none")
+	}
+	if bytes.Contains(trimmed, []byte("\n")) {
+		t.Fatalf("expected one log line, got multiple:\n%s", trimmed)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(trimmed, &m); err != nil {
+		t.Fatalf("decode log line: %v\n%s", err, trimmed)
+	}
+	return m
+}
+
+// assertNoSecretLeak is a guard the FEN-1174 acceptance criteria calls out
+// explicitly: no log line may emit secret material. Tests pass in the
+// concrete values they injected so a future regression that starts logging
+// the auth code, state nonce, or session SID fails loudly here.
+func assertNoSecretLeak(t *testing.T, raw []byte, secrets []string) {
+	t.Helper()
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		if bytes.Contains(raw, []byte(secret)) {
+			t.Fatalf("secret %q leaked into log output:\n%s", secret, raw)
+		}
+	}
 }
 
 func (s *DeviceUISuite) TestConfirmNoSessionRedirectsBack() {
