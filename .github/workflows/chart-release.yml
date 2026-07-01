@@ -54,7 +54,7 @@ jobs:
         with:
           # Pinned to the Helm line the chart is authored against (the
           # chart relies on Helm v4 hook-ordering semantics).
-          version: v4.0.5
+          version: v4.2.2
 
       - name: Resolve chart version + release decision
         id: resolve
