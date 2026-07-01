@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	github.com/chromedp/cdproto v0.0.0-20260427013145-5737772c319b
 	github.com/chromedp/chromedp v0.15.1
-	github.com/coreos/go-oidc/v3 v3.18.0
+	github.com/coreos/go-oidc/v3 v3.19.0
 	github.com/danielgtaylor/huma/v2 v2.38.0
 	github.com/gojekfarm/xrun v0.4.0
 	github.com/gojekfarm/xtools/xload v0.10.0
