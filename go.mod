@@ -15,7 +15,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.42.0
-	go.temporal.io/api v1.62.12
+	go.temporal.io/api v1.63.0
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.28.0
 	go.uber.org/zap/exp v0.3.0
